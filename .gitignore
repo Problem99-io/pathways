@@ -3,3 +3,6 @@ dist
 workspace
 *.tmp
 .DS_Store
+
+# Local backups of private plans
+.snapshots/

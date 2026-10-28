@@ -4,7 +4,10 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { WORKSPACE } from './storage'
+
+const MERGE_DRIVER = fileURLToPath(new URL('../scripts/merge-json.mjs', import.meta.url))
 
 export interface GitStatus {
   available: boolean
@@ -143,6 +146,7 @@ export function init(remoteUrl?: string) {
   return locked(async () => {
     const i = await info()
     if (!i.repo) await must(['init', '-b', 'main'])
+    await configureMerge()
     if (remoteUrl) {
       const has = await git(['remote', 'get-url', 'origin'])
       await must(has.code === 0 ? ['remote', 'set-url', 'origin', remoteUrl] : ['remote', 'add', 'origin', remoteUrl])
@@ -246,7 +250,19 @@ export async function setAutoSync(on: boolean) {
   schedule()
 }
 
+/**
+ * Plans merge field by field: register the merge driver that .gitattributes
+ * (`*.json merge=pathways`) points at. It's local git config, so each computer
+ * sets it for itself; without it git falls back to its usual line merge.
+ */
+export async function configureMerge() {
+  if ((await git(['rev-parse', '--is-inside-work-tree'])).code !== 0) return
+  await git(['config', 'merge.pathways.name', 'Pathways: merge plans field by field'])
+  await git(['config', 'merge.pathways.driver', `"${process.execPath}" "${MERGE_DRIVER}" %O %A %B`])
+}
+
 export async function restoreAutoSync() {
+  await configureMerge()
   const f = await autoSyncFile()
   autoSync = !!f && fs.existsSync(f)
   schedule()

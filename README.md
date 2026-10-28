@@ -97,13 +97,24 @@ Plans are plain files, so the source of truth is a git repo:
 ```
 workspace/
   <pathway>/
-    pathway.json      where you are, goals, context, paths, people, signals
-    nodes/<id>.json   one file per step, so concurrent edits rarely conflict
-    activity.jsonl    append-only log (merge=union)
-    assets/           uploaded images and files
+    pathway.json        title, start date, where you are now
+    context.md          the background, one paragraph per line
+    goals/<id>.json     one file per goal
+    paths/<id>.json     one file per path
+    people/<id>.json    one file per teammate
+    refs/<id>.json      one file per reference
+    signals/<id>.json   one file per change or request
+    nodes/<id>.json     one file per step
+    activity.jsonl      append-only log (merge=union)
+    assets/             uploaded images and files
+  .local/               this computer only: the position you last moved (git-ignored)
 ```
 
-Open **Sync** in the app and click **Start tracking with git**, optionally with a remote URL. From then on, **Sync now** commits your changes with an auto-generated message, pulls your teammates' changes and pushes. You can also turn on auto-sync. Changes pulled from teammates show up live. If two people edit the same lines, you choose *Keep mine* or *Keep theirs*.
+Open **Sync** in the app and click **Start tracking with git**, optionally with a remote URL. From then on, **Sync now** commits your changes with an auto-generated message, pulls your teammates' changes and pushes. You can also turn on auto-sync. Changes pulled from teammates show up live.
+
+**Working at the same time.** Everything is one file per thing, so two people adding references, logging changes, adding goals or teammates, or moving their own "you are here" never touch the same file. When two people do edit the same thing, the files merge field by field: one changes a step's duration and the other its description, and both changes are kept. Lists like a step's assignees merge as sets. Only when both change the very same field does one side win, the more recent edit. The app registers this merge driver (`scripts/merge-json.mjs`) in your plans repo's git config when it starts. Edits to different paragraphs of the context merge too. If git still can't combine something, you choose *Keep mine* or *Keep theirs*.
+
+Plans saved in the older layout, with everything in `pathway.json`, still open. The app writes the new layout the next time it saves. Everyone sharing a plans repo should update the app.
 
 To point the app at any folder, for example a clone of your team's plans repo or a `plans/` folder inside an existing repo:
 
@@ -120,7 +131,7 @@ shared/   data model, ops (every change is an op), prediction engine
 server/   Express API, live events (SSE), git sync, file storage, MCP over HTTP
 mcp/      MCP tools + stdio entry
 src/      React app (React Flow, Motion, Zustand)
-scripts/  demo seeding via MCP
+scripts/  demo seeding via MCP, the git merge driver for plans
 ```
 
 Environment variables: `PATHWAYS_DIR` (workspace folder), `PATHWAYS_PORT` (API port, default 4317), `PATHWAYS_URL` (for the stdio MCP server and the demo script).

@@ -1,18 +1,29 @@
-// Git-friendly storage. Each pathway is a folder of small, stable JSON files:
+// Git-friendly storage. Each pathway is a folder of small, stable files, one
+// per thing, so two people adding or editing different things never touch the
+// same file:
 //
 //   <workspace>/<pathway-id>/
-//     pathway.json        meta: current state, goal, context, people, paths, signals
-//     nodes/<id>.json     one file per step — concurrent edits rarely conflict
+//     pathway.json        title, start date and where you are now
+//     context.md          the background, one paragraph per line
+//     goals/<id>.json     one file per goal     (with an `order` for lane order)
+//     paths/<id>.json     one file per path     (same)
+//     people/<id>.json    one file per teammate (same)
+//     refs/<id>.json      one file per reference
+//     signals/<id>.json   one file per change or request
+//     nodes/<id>.json     one file per step
 //     activity.jsonl      append-only log (merge=union in .gitattributes)
 //     assets/             uploaded images and files
+//   <workspace>/.local/<pathway-id>.json   this computer only: the position you last moved
 //
-// Files are the source of truth; the in-memory copy is reloaded when they
-// change on disk (e.g. after `git pull`).
+// JSON files merge field by field (scripts/merge-json.mjs, merge=pathways).
+// The old layout, with everything in pathway.json, still loads; the next save
+// writes the new one. Files are the source of truth; the in-memory copy is
+// reloaded when they change on disk (e.g. after `git pull`).
 
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import type { ActivityEntry, PathNode, Pathway, PathwayDoc } from '../shared/types'
+import type { ActivityEntry, PathNode, Pathway } from '../shared/types'
 import { migratePathway } from '../shared/ops'
 
 export const WORKSPACE = path.resolve(process.env.PATHWAYS_DIR || path.join(process.cwd(), 'workspace'))
@@ -35,33 +46,100 @@ function orderNode(n: PathNode) {
 }
 
 function metaOf(p: Pathway) {
-  const { nodes: _n, ...rest } = p as PathwayDoc
-  const { rev: _r, activity: _a, ...meta } = rest as Partial<PathwayDoc>
-  return {
-    id: meta.id,
-    title: meta.title,
-    startDate: meta.startDate,
-    current: meta.current,
-    goals: meta.goals,
-    context: meta.context,
-    currentNodeId: meta.currentNodeId,
-    paths: meta.paths,
-    people: meta.people,
-    attachments: meta.attachments,
-    signals: meta.signals,
-    createdAt: meta.createdAt,
+  return { id: p.id, title: p.title, startDate: p.startDate, current: p.current, createdAt: p.createdAt }
+}
+
+type Item = { id: string } & Record<string, unknown>
+/** Lists kept one file per item. Ordered ones store an `order`; the rest sort by time. */
+const LISTS = [
+  { key: 'goals', dir: 'goals', ordered: true },
+  { key: 'paths', dir: 'paths', ordered: true },
+  { key: 'people', dir: 'people', ordered: true },
+  { key: 'attachments', dir: 'refs', time: 'addedAt' },
+  { key: 'signals', dir: 'signals', time: 'at' },
+] as const
+type List = (typeof LISTS)[number]
+type ListKey = List['key']
+
+const fileName = (id: string) => `${encodeURIComponent(id)}.json`
+/** The order each ordered item was last read or written with, by file. */
+const orders = new Map<string, number>()
+
+async function readList(dir: string, l: List, old: unknown): Promise<Item[]> {
+  const sub = path.join(dir, l.dir)
+  const items: { item: Item; order: number }[] = []
+  if (fs.existsSync(sub)) {
+    for (const f of (await fsp.readdir(sub)).sort()) {
+      if (!f.endsWith('.json')) continue
+      const file = path.join(sub, f)
+      const raw = await readJson<Item & { order?: number }>(file)
+      if (!raw?.id) continue
+      const { order, ...item } = raw
+      if (typeof order === 'number') orders.set(file, order)
+      items.push({ item: item as Item, order: typeof order === 'number' ? order : Infinity })
+    }
+  }
+  // the old layout (or an older app) kept the list in pathway.json: keep anything not yet in its own file
+  if (Array.isArray(old)) {
+    const top = Math.max(-1, ...items.map((x) => (Number.isFinite(x.order) ? x.order : -1)))
+    old.forEach((item: Item, i) => {
+      if (item?.id && !items.some((x) => x.item.id === item.id)) items.push({ item, order: top + 1 + i })
+    })
+  }
+  if ('ordered' in l) items.sort((a, b) => a.order - b.order || a.item.id.localeCompare(b.item.id))
+  else items.sort((a, b) => String(a.item[l.time] ?? '').localeCompare(String(b.item[l.time] ?? '')) || a.item.id.localeCompare(b.item.id))
+  return items.map((x) => x.item)
+}
+
+async function writeList(dir: string, l: List, list: Item[]) {
+  const sub = path.join(dir, l.dir)
+  const keep = new Set<string>()
+  let last = -Infinity
+  for (const item of list) {
+    const file = path.join(sub, fileName(item.id))
+    keep.add(file)
+    let body: Record<string, unknown> = item
+    if ('ordered' in l) {
+      // keep each item's order unless it's out of sequence now (new, or moved): adding one never renumbers the rest
+      let order = orders.get(file)
+      if (order === undefined || order <= last) order = Number.isFinite(last) ? Math.floor(last) + 1 : 0
+      last = order
+      orders.set(file, order)
+      body = { ...item, order }
+    }
+    await writeIfChanged(file, stable(body))
+  }
+  if (!fs.existsSync(sub)) return
+  for (const f of await fsp.readdir(sub)) {
+    const file = path.join(sub, f)
+    if (f.endsWith('.json') && !keep.has(file)) {
+      await fsp.rm(file, { force: true })
+      written.delete(file)
+      orders.delete(file)
+    }
   }
 }
+
+const localFile = (id: string) => path.join(WORKSPACE, '.local', `${id}.json`)
 
 /** What we last wrote / read for each file, so we only touch files that changed. */
 const written = new Map<string, string>()
 
+/** Make sure a text file has these lines, adding any that are missing (with their comment). */
+function ensureLines(file: string, lines: [comment: string, line: string][]) {
+  const cur = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+  const have = new Set(cur.split('\n').map((x) => x.trim()))
+  const add = lines.filter(([, line]) => !have.has(line)).map(([c, line]) => `# ${c}\n${line}\n`)
+  if (add.length) fs.writeFileSync(file, `${cur}${cur && !cur.endsWith('\n') ? '\n' : ''}${add.join('')}`)
+}
+
 export function ensureWorkspace() {
   fs.mkdirSync(WORKSPACE, { recursive: true })
-  const attrs = path.join(WORKSPACE, '.gitattributes')
-  if (!fs.existsSync(attrs)) {
-    fs.writeFileSync(attrs, '# Activity logs are append-only: keep both sides on merge\n*.jsonl merge=union\n')
-  }
+  ensureLines(path.join(WORKSPACE, '.gitattributes'), [
+    ['Activity logs are append-only: keep both sides on merge', '*.jsonl merge=union'],
+    ['Plans merge field by field, so two people editing different things never conflict', '*.json merge=pathways'],
+  ])
+  ensureLines(path.join(WORKSPACE, '.gitignore'), [['Where you last were stays on this computer', '.local/']])
   const readme = path.join(WORKSPACE, 'README.md')
   if (!fs.existsSync(readme)) {
     fs.writeFileSync(
@@ -95,8 +173,13 @@ async function readJson<T>(file: string): Promise<T | null> {
 
 export async function load(id: string): Promise<{ pathway: Pathway; activity: ActivityEntry[] } | null> {
   const dir = dirOf(id)
-  const meta = await readJson<Omit<Pathway, 'nodes'>>(path.join(dir, 'pathway.json'))
+  const meta = await readJson<Partial<Pathway> & Record<string, unknown>>(path.join(dir, 'pathway.json'))
   if (!meta) return null
+  const lists = {} as Record<ListKey, Item[]>
+  for (const l of LISTS) lists[l.key] = await readList(dir, l, meta[l.key])
+  const contextFile = path.join(dir, 'context.md')
+  const context = fs.existsSync(contextFile) ? fromMarkdown((await readText(contextFile)) ?? '') : (meta.context ?? '')
+  const local = (await readJsonQuiet<{ currentNodeId?: string | null }>(localFile(id))) ?? {}
   const nodes: PathNode[] = []
   const nodeDir = path.join(dir, 'nodes')
   if (fs.existsSync(nodeDir)) {
@@ -107,14 +190,10 @@ export async function load(id: string): Promise<{ pathway: Pathway; activity: Ac
     }
   }
   const pathway: Pathway = {
-    goals: [],
-    people: [],
-    paths: [],
-    attachments: [],
-    signals: [],
-    context: '',
-    currentNodeId: null,
     ...(meta as Partial<Pathway>),
+    ...(lists as unknown as Pick<Pathway, ListKey>),
+    context,
+    currentNodeId: 'currentNodeId' in local ? (local.currentNodeId ?? null) : (meta.currentNodeId ?? null),
     nodes,
     id,
   } as Pathway
@@ -149,8 +228,39 @@ async function writeIfChanged(file: string, content: string) {
   return true
 }
 
+// The context as Markdown: one line per paragraph, so edits to different paragraphs merge.
+const toMarkdown = (s: string) => (s.endsWith('\n') ? s : `${s}\n`)
+const fromMarkdown = (s: string) => (s.endsWith('\n') ? s.slice(0, -1) : s)
+
+async function readText(file: string) {
+  try {
+    const raw = await fsp.readFile(file, 'utf8')
+    written.set(file, raw)
+    return raw
+  } catch {
+    return null
+  }
+}
+
+async function readJsonQuiet<T>(file: string): Promise<T | null> {
+  try {
+    return JSON.parse(await fsp.readFile(file, 'utf8')) as T
+  } catch {
+    return null
+  }
+}
+
 export async function save(p: Pathway) {
   const dir = dirOf(p.id)
+  for (const l of LISTS) await writeList(dir, l, (p[l.key] ?? []) as unknown as Item[])
+  const contextFile = path.join(dir, 'context.md')
+  if (p.context) await writeIfChanged(contextFile, toMarkdown(p.context))
+  else if (fs.existsSync(contextFile)) {
+    await fsp.rm(contextFile, { force: true })
+    written.delete(contextFile)
+  }
+  await writeIfChanged(localFile(p.id), stable({ currentNodeId: p.currentNodeId ?? null }))
+  // last, so a pathway.json without its lists only appears once they're in their own files
   await writeIfChanged(path.join(dir, 'pathway.json'), stable(metaOf(p)))
   const nodeDir = path.join(dir, 'nodes')
   await fsp.mkdir(nodeDir, { recursive: true })
@@ -218,10 +328,14 @@ export async function changedOnDisk(file: string) {
 export async function externallyChanged(id: string) {
   const dir = dirOf(id)
   const files = [path.join(dir, 'pathway.json'), path.join(dir, 'activity.jsonl')]
-  const nodeDir = path.join(dir, 'nodes')
-  if (fs.existsSync(nodeDir)) for (const f of await fsp.readdir(nodeDir)) if (f.endsWith('.json')) files.push(path.join(nodeDir, f))
+  const contextFile = path.join(dir, 'context.md')
+  if (fs.existsSync(contextFile) || written.has(contextFile)) files.push(contextFile)
+  for (const sub of ['nodes', ...LISTS.map((l) => l.dir)]) {
+    const d = path.join(dir, sub)
+    if (fs.existsSync(d)) for (const f of await fsp.readdir(d)) if (f.endsWith('.json')) files.push(path.join(d, f))
+  }
   for (const f of files) if (await changedOnDisk(f)) return true
-  // a node file we know about was deleted
-  for (const k of written.keys()) if (k.startsWith(nodeDir + path.sep) && !fs.existsSync(k)) return true
+  // a file we know about was deleted
+  for (const k of written.keys()) if (k.startsWith(dir + path.sep) && !fs.existsSync(k)) return true
   return false
 }
