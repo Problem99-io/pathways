@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
+  Shuffle,
   Split,
   Dices,
   Check,
@@ -21,12 +22,12 @@ import {
   Layers,
   CalendarRange,
 } from 'lucide-react'
-import { plannedWindow, nodeDuration, pathMetrics } from '../../shared/metrics'
+import { plannedWindow, nodeDuration, pathMetrics, topo } from '../../shared/metrics'
 import { normalised, outcomeIndex } from '../../shared/branches'
 import { uid } from '../../shared/ops'
 import type { Cadence, NodeKind, NodeStatus, PathNode } from '../../shared/types'
 import { useStore } from '../store'
-import { complete, drillInto, forkFrom, removeStep, setCurrent, addStep, addFutures, addOutcome, removeFutures, settleFork } from '../lib/actions'
+import { complete, drillInto, forkFrom, removeStep, setCurrent, addStep, addFutures, addOutcome, removeFutures, settleFork, setOutcomeTarget } from '../lib/actions'
 import { fmtDate, fmtDays, KIND_LABEL, STATUS_LABEL, timeAgo } from '../lib/format'
 import { Avatar, EditableText, KIND_ICON, Section, Segmented, softSpring } from './ui'
 import { Attachments } from './Attachments'
@@ -332,6 +333,31 @@ function NodeDetail({ node: n }: { node: PathNode }) {
 function OutcomeOf({ n }: { n: PathNode }) {
   const doc = useStore((s) => s.doc)!
   const select = useStore((s) => s.select)
+  // other paths that may switch onto this path here
+  const arrivals = doc.nodes.flatMap((f) => (f.branch?.outcomes ?? []).filter((o) => o.jumpTo?.nodeId === n.id).map((o) => ({ f, o })))
+  if (arrivals.length && !n.outcomeOf) {
+    return (
+      <>
+        {arrivals.map(({ f, o }) => {
+          const from = doc.paths.find((p) => p.id === f.pathId)
+          const pct = f.branch!.mode === 'chance' ? Math.round(normalised(f.branch!).find((x) => x.id === o.id)!.probability * 100) : null
+          const b = f.branch!
+          return (
+            <div key={o.id} className={`outcome-of ${b.resolved ? (b.resolved === o.id ? 'taken' : 'gone') : ''}`}>
+              <Shuffle size={13} />
+              <span className="grow">
+                {b.resolved === o.id ? 'You switched here from' : 'You may switch here from'} <b>{from?.name}</b> if <b>{o.label}</b>
+                {pct !== null && !b.resolved && <> · {pct}%</>} after{' '}
+                <button className="link" onClick={() => select(f.id)}>
+                  {f.title}
+                </button>
+              </span>
+            </div>
+          )
+        })}
+      </>
+    )
+  }
   if (!n.outcomeOf) return null
   const fork = outcomeIndex(doc).get(n.outcomeOf)
   if (!fork?.branch) return null
@@ -403,12 +429,35 @@ function FuturesBlock({ n }: { n: PathNode }) {
                 />
               )}
               <div className="future-foot">
-                {first ? (
+                <select
+                  className="leads-to"
+                  value={o.jumpTo ? o.jumpTo.nodeId : ''}
+                  title="Where this future goes: steps of its own, or switch to another path and start at one of its steps"
+                  onChange={(e) => setOutcomeTarget(n, o.id, e.target.value ? doc.nodes.find((x) => x.id === e.target.value) ?? null : null)}
+                >
+                  <option value="">Its own steps</option>
+                  {doc.paths
+                    .filter((p) => p.id !== n.pathId && p.status !== 'archived')
+                    .map((p) => (
+                      <optgroup key={p.id} label={`Switch to ${p.name} at…`}>
+                        {topo(doc.nodes.filter((x) => x.pathId === p.id && x.parentId === null)).map((x) => (
+                          <option key={x.id} value={x.id}>
+                            {x.title}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                </select>
+                {o.jumpTo ? (
+                  <button className="link" onClick={() => goTo({ nodeId: o.jumpTo!.nodeId })}>
+                    <Shuffle size={11} /> {doc.paths.find((p) => p.id === o.jumpTo!.pathId)?.name}
+                  </button>
+                ) : first ? (
                   <button className="link" onClick={() => goTo({ nodeId: first.id })}>
                     <CornerDownRight size={11} /> {first.title}
                   </button>
                 ) : (
-                  <button className="link" onClick={() => addStep({ pathId: n.pathId, parentId: n.parentId, dependsOn: [n.id], title: o.label })}>
+                  <button className="link" onClick={() => setOutcomeTarget(n, o.id, null)}>
                     <Plus size={11} /> First step this way
                   </button>
                 )}

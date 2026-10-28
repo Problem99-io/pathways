@@ -6,7 +6,7 @@ import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { rankByGoal, rankPaths, pathMetrics, children, planningView, type Futures } from '../shared/metrics'
-import { deadSet, normalised, outcomeIndex } from '../shared/branches'
+import { deadSet, normalised, outcomeIndex, settleOps } from '../shared/branches'
 import { forward } from '../shared/forward'
 import { uid, type Op } from '../shared/ops'
 import type { Actor, PathNode, PathwayDoc, PathwaySummary } from '../shared/types'
@@ -212,6 +212,9 @@ function stepView(doc: PathwayDoc, n: PathNode, ctx: FutureCtx = futureCtx(doc, 
         probability: b.mode === 'chance' ? Math.round(o.probability * 100) / 100 : undefined,
         expectedDaysToGoal: ctx.futures?.byOutcome[o.id]?.days,
         firstStepId: doc.nodes.find((x) => x.outcomeOf === o.id)?.id,
+        switchTo: o.jumpTo
+          ? { pathId: o.jumpTo.pathId, path: doc.paths.find((x) => x.id === o.jumpTo!.pathId)?.name, stepId: o.jumpTo.nodeId, step: doc.nodes.find((x) => x.id === o.jumpTo!.nodeId)?.title }
+          : undefined,
       })),
     }
   }
@@ -219,6 +222,8 @@ function stepView(doc: PathwayDoc, n: PathNode, ctx: FutureCtx = futureCtx(doc, 
     const f = outcomeIndex(doc).get(n.outcomeOf)
     out.onlyIf = { forkStepId: f?.id, outcome: f?.branch?.outcomes.find((o) => o.id === n.outcomeOf)?.label }
   }
+  const arrivals = doc.nodes.flatMap((f) => (f.branch?.outcomes ?? []).filter((o) => o.jumpTo?.nodeId === n.id).map((o) => ({ forkStepId: f.id, path: doc.paths.find((x) => x.id === f.pathId)?.name, outcome: o.label })))
+  if (arrivals.length) out.otherPathsMaySwitchHere = arrivals
   if (ctx.gone.has(n.id)) out.future = 'didnt_happen'
   else if (ctx.alt.has(n.id)) out.future = 'alternative'
   const reach = ctx.futures?.reach[n.id]
@@ -926,7 +931,7 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
     {
       title: 'Map the possible futures after a step',
       description:
-        'Turn a step into a fork: after it, the future can go several ways. mode "chance" = it is not up to the user (an investor says yes or no, a launch flops or takes off) and each outcome gets a probability; mode "choice" = the user decides between options. Each outcome leads to its own sequence of steps (same format as add_steps). The app then predicts across every combination of futures: expected time to the goal, best/worst case, how likely each step is to happen, and which choice is quickest. Pass an existing outcome id to change its label or probability. With rejoin "next" (default) whatever already followed the step waits for whichever future happens; "none" lets each future run on to the goal by itself.',
+        'Turn a step into a fork: after it, the future can go several ways. mode "chance" = it is not up to the user (an investor says yes or no, a launch flops or takes off) and each outcome gets a probability; mode "choice" = the user decides between options. Each outcome leads to its own sequence of steps (same format as add_steps), carries on as the path already goes (continueAsPlanned), or switches to another path partway in (switchTo) — this is how paths intertwine: start on a good path A, and if something happens move to plan B at the step that makes sense. The app then predicts across every combination of futures: expected time to the goal, best/worst case, how likely each step is to happen, and which choice is quickest. Pass an existing outcome id to change its label or probability. With rejoin "next" (default) whatever already followed the step waits for whichever future happens; "none" lets each future run on to the goal by itself.',
       inputSchema: {
         pathwayId: z.string(),
         stepId: z.string().describe('The step after which things can go several ways'),
@@ -938,7 +943,12 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
               label: z.string().describe('Short: "Raise the seed round", "No — bootstrap instead"'),
               probability: z.number().min(0).max(1).optional().describe('chance mode: how likely (normalised to add up to 1 across outcomes). Be honest, use base rates'),
               description: z.string().optional(),
-              steps: z.array(step).optional().describe('The steps this future leads to, in order. Required for new outcomes'),
+              steps: z.array(step).optional().describe('The steps this future leads to, in order. New outcomes need steps, switchTo or continueAsPlanned'),
+              switchTo: z
+                .object({ pathId: z.string(), stepId: z.string().describe('Top-level step on that path to start at; its earlier steps are skipped when this happens') })
+                .optional()
+                .describe('Instead of steps of its own: in this future the user switches to another path and starts partway in (e.g. "if the client leaves, go to Plan B at \'Launch to waitlist\'")'),
+              continueAsPlanned: z.boolean().optional().describe('This outcome is the path carrying on as it already goes: the steps that currently follow the fork belong to it'),
             }),
           )
           .min(1),
@@ -956,6 +966,7 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
           const people = new Map<string, string>()
           const outcomes = [...(n.branch?.outcomes ?? [])]
           const sinks: string[] = []
+          const continuing: string[] = []
           for (const o of a.outcomes) {
             const existing = o.id ? outcomes.find((x) => x.id === o.id) : undefined
             if (existing) {
@@ -963,8 +974,27 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
               if (!o.steps?.length) continue
             }
             const oid = existing?.id ?? uid()
-            if (!existing) outcomes.push({ id: oid, label: o.label, probability: o.probability ?? 1 / a.outcomes.length, description: o.description })
-            if (!o.steps?.length) throw new Error(`Outcome "${o.label}" needs steps`)
+            const jumpTo = o.switchTo ? { pathId: o.switchTo.pathId, nodeId: o.switchTo.stepId } : undefined
+            if (jumpTo) {
+              const t = doc.nodes.find((x) => x.id === jumpTo.nodeId)
+              if (!t || t.pathId !== jumpTo.pathId || t.parentId !== null) throw new Error(`switchTo: ${jumpTo.nodeId} is not a top-level step on path ${jumpTo.pathId}`)
+              if (t.pathId === n.pathId) throw new Error('switchTo must point at a different path')
+            }
+            if (existing) {
+              if (jumpTo) existing.jumpTo = jumpTo
+            } else outcomes.push({ id: oid, label: o.label, probability: o.probability ?? 1 / a.outcomes.length, description: o.description, jumpTo })
+            if (jumpTo) {
+              created.push({ outcomeId: oid, label: o.label, stepIds: [] })
+              continue
+            }
+            if (o.continueAsPlanned) {
+              const next = doc.nodes.filter((x) => x.parentId === n.parentId && x.dependsOn.includes(n.id) && !x.outcomeOf)
+              for (const x of next) ops.push({ t: 'node.update', id: x.id, patch: { outcomeOf: oid } })
+              continuing.push(...next.map((x) => x.id))
+              created.push({ outcomeId: oid, label: o.label, stepIds: next.map((x) => x.id) })
+              continue
+            }
+            if (!o.steps?.length) throw new Error(`Outcome "${o.label}" needs steps, switchTo or continueAsPlanned`)
             const from = ops.length
             const ids = compileSteps(doc, n.pathId, n.parentId, o.steps as StepIn[], ops, keys, people, { after: n.id })
             // the first step of the branch is the one that only happens in this future
@@ -976,7 +1006,7 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
           if ((a.rejoin ?? 'next') === 'next' && sinks.length) {
             // what came after the fork now waits for whichever future happens
             const fresh = new Set(created.flatMap((c) => c.stepIds))
-            for (const s of doc.nodes.filter((x) => x.parentId === n.parentId && x.dependsOn.includes(n.id) && !fresh.has(x.id) && !x.outcomeOf)) {
+            for (const s of doc.nodes.filter((x) => x.parentId === n.parentId && x.dependsOn.includes(n.id) && !fresh.has(x.id) && !x.outcomeOf && !continuing.includes(x.id))) {
               ops.push({ t: 'node.update', id: s.id, patch: { dependsOn: [...new Set([...s.dependsOn.filter((d) => d !== n.id), ...sinks])] } })
             }
           }
@@ -996,7 +1026,7 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
     {
       title: 'Say which way a fork went',
       description:
-        'Record which outcome actually happened at a chance fork (or which option the user chose). The other futures fade as "didn\'t happen", "you are here" moves into the branch that happened, and the forecasts update. A chance fork is marked done. Pass outcome null to un-settle.',
+        'Record which outcome actually happened at a chance fork (or which option the user chose). The other futures fade as "didn\'t happen", "you are here" moves into the branch that happened, and the forecasts update. A chance fork is marked done. If the outcome switches to another path, the user now pursues that path starting at its step (its earlier steps are skipped) and stops pursuing this one. Pass outcome null to un-settle.',
       inputSchema: {
         pathwayId: z.string(),
         stepId: z.string(),
@@ -1010,10 +1040,7 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
           if (!n?.branch) throw new Error('That step is not a fork. Use branch_step first.')
           const o = a.outcome === null ? null : n.branch.outcomes.find((x) => x.id === a.outcome || x.label.toLowerCase() === a.outcome!.toLowerCase())
           if (a.outcome !== null && !o) throw new Error(`No outcome "${a.outcome}". Options: ${n.branch.outcomes.map((x) => x.label).join(', ')}`)
-          const ops: Op[] = []
-          if (o && n.status !== 'done' && (n.branch.mode === 'chance' || n.kind === 'decision')) ops.push({ t: 'node.complete', id: n.id })
-          ops.push({ t: 'node.update', id: n.id, patch: { branch: { ...n.branch, resolved: o?.id } } })
-          return ops
+          return settleOps(doc, n, o?.id ?? null)
         })
         const n = doc.nodes.find((x) => x.id === a.stepId)!
         const path = doc.paths.find((x) => x.id === n.pathId)

@@ -77,6 +77,8 @@ export interface EdgeOutcome {
   planned: boolean
   days?: number
   branchId: string
+  /** This future switches to another path (its name). */
+  jump?: string
 }
 
 export interface LaneData extends Record<string, unknown> {
@@ -498,6 +500,28 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
           e.data.insert = undefined
           // a future that didn't happen, or one waiting on the fork, doesn't flow yet
           if (oc.state !== 'taken' && e.data.state === 'active') e.data.state = 'future'
+        }
+        edges.push(e)
+      }
+      // futures that switch to another path: a link across to the step you'd start at
+      for (const oc of n.branch?.outcomes ?? []) {
+        if (!oc.jumpTo || !scopeIds.has(oc.jumpTo.nodeId)) continue
+        const to = scopeList.find((x) => x.id === oc.jumpTo!.nodeId)!
+        const toPath = doc.paths.find((x) => x.id === to.pathId)
+        const prob = normalised(n.branch!).find((x) => x.id === oc.id)!.probability
+        const resolved = n.branch!.resolved
+        const state: EdgeOutcome['state'] = resolved ? (resolved === oc.id ? 'taken' : 'gone') : 'open'
+        const e = flowEdge(`e:jump:${n.id}->${to.id}`, n.id, to.id, l.path, state === 'taken' ? 'done' : 'future', Math.max(fogFor(n.id, n), fogFor(to.id, to)) as Fog)
+        e.data.fate = state === 'gone' || gone.has(n.id) ? 'gone' : undefined
+        e.data.outcome = {
+          label: oc.label,
+          probability: prob,
+          mode: n.branch!.mode,
+          state,
+          planned: !resolved && selectedOutcome(planningView(doc).nodes.find((x) => x.id === n.id) ?? n) === oc.id,
+          days: o.metrics[n.pathId]?.futures?.byOutcome[oc.id]?.days,
+          branchId: n.id,
+          jump: toPath?.name,
         }
         edges.push(e)
       }

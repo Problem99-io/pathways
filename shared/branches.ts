@@ -8,6 +8,7 @@
 // assumed for a scenario, else the default (most likely / first option).
 
 import type { Branch, Outcome, PathNode, Pathway } from './types'
+import type { Op } from './ops'
 
 /** Outcomes with probabilities that add up to 1 (choices weigh equally). */
 export function normalised(b: Branch): Outcome[] {
@@ -89,4 +90,49 @@ export function waitingOnBranch(p: Pathway, n: PathNode): PathNode | null {
   if (!n.outcomeOf) return null
   const b = outcomeIndex(p).get(n.outcomeOf)
   return b && b.branch!.resolved !== n.outcomeOf ? b : null
+}
+
+const done = (n: PathNode) => n.status === 'done' || n.status === 'skipped'
+
+/** The outcome currently selected at a fork, if it switches to another path. */
+export function jumpOf(n: PathNode) {
+  const sel = selectedOutcome(n)
+  const o = n.branch?.outcomes.find((x) => x.id === sel)
+  return o?.jumpTo ? { outcome: o, ...o.jumpTo } : null
+}
+
+/** Steps of the same level that `id` depends on, transitively. */
+export function ancestorsOf(p: Pathway, id: string): PathNode[] {
+  const byId = new Map(p.nodes.map((n) => [n.id, n]))
+  const out = new Map<string, PathNode>()
+  const stack = [...(byId.get(id)?.dependsOn ?? [])]
+  while (stack.length) {
+    const cur = byId.get(stack.pop()!)
+    if (!cur || out.has(cur.id)) continue
+    out.set(cur.id, cur)
+    stack.push(...cur.dependsOn)
+  }
+  return [...out.values()]
+}
+
+/**
+ * Ops to say which way a fork went. A chance fork (or a decision step) is done
+ * once you know. If the outcome switches to another path, you start on that
+ * path at its step: you pursue it from there, its earlier steps are skipped
+ * (the path you were on already covered them), and you stop pursuing the old one.
+ */
+export function settleOps(p: Pathway, fork: PathNode, outcomeId: string | null): Op[] {
+  const b = fork.branch
+  if (!b) return []
+  const ops: Op[] = []
+  if (outcomeId && !done(fork) && (b.mode === 'chance' || fork.kind === 'decision')) ops.push({ t: 'node.complete', id: fork.id })
+  ops.push({ t: 'node.update', id: fork.id, patch: { branch: { ...b, resolved: outcomeId ?? undefined } } })
+  const jump = b.outcomes.find((o) => o.id === outcomeId)?.jumpTo
+  const target = jump && p.nodes.find((n) => n.id === jump.nodeId)
+  if (target) {
+    for (const a of ancestorsOf(p, target.id)) if (!done(a)) ops.push({ t: 'node.update', id: a.id, patch: { status: 'skipped' } })
+    ops.push({ t: 'current.set', nodeId: target.id, pathId: target.pathId })
+    if (p.paths.find((x) => x.id === fork.pathId)?.pursuing) ops.push({ t: 'path.pursue', id: fork.pathId, on: false })
+  }
+  return ops
 }

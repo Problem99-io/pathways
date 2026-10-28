@@ -4963,3 +4963,37 @@ kbd {
   color: var(--text);
   border-color: var(--cyan);
 }
+.outcome-pill .op-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 5px;
+  margin-left: 1px;
+  border-left: 1px solid var(--line-2);
+  color: var(--text);
+  font-weight: 600;
+}
+.outcome-pill.taken .op-jump {
+  border-color: rgba(4, 17, 15, 0.25);
+  color: inherit;
+}
+.future-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.leads-to {
+  flex: none;
+  max-width: 52%;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 7px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  color: var(--text-2);
+  font-size: 11px;
+}
+.future-foot .link {
+  min-width: 0;
+}

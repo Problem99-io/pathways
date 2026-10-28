@@ -33,6 +33,7 @@ npm run demo
   - Each outcome leads to its own steps, and the branches can merge back.
   - The prediction engine weighs every combination. It shows the expected time, the best and worst case, how likely each step is to happen, and which option is quickest. More likely futures are drawn with thicker lines.
   - When it plays out, say **What happened?** The other futures fade as *didn't happen*, "you are here" moves into the branch that happened, and the forecast tightens.
+  - **Paths can intertwine.** A future can *switch to another path* partway in. For example: "start on Plan A, but if the client leaves, move to Plan B at *Launch to waitlist*". The forecast follows the route across both paths. When it happens, you start on Plan B at that step, and its earlier steps are skipped. Right-click a step → **Possible futures → If something happens, switch to…**, or choose **Leads to** on an outcome.
   - Use **Futures** in the step panel or right-click → **Possible futures**. The AI uses `branch_step` / `settle_branch`.
 - **Recurring steps** are ongoing loops, like growing an audience or doing outreach. Their sub-steps are one cycle, and drilling in shows the loop arc. Log a cycle along with the metric value at that point.
 - **Sub-paths.** Any step can contain its own steps. Use **Break down** or double-click a step to drill in, with breadcrumbs back out.

@@ -2,7 +2,7 @@
 // expected time-to-goal and planned-vs-actual progress for every path.
 
 import type { PathNode, Pathway } from './types'
-import { assume, deadSet, isBranch, normalised } from './branches'
+import { assume, deadSet, isBranch, jumpOf, normalised } from './branches'
 
 const DAY = 86_400_000
 
@@ -104,6 +104,47 @@ export function live(p: Pathway, nodes: PathNode[]) {
 }
 const kidsOf = (p: Pathway, id: string) => live(p, children(p, id))
 
+/**
+ * The top-level steps you'd actually walk on this path: its own (that happen),
+ * plus — when a fork switches to another path — that path's steps from the
+ * switch point on, starting right after the fork.
+ */
+export function routeOf(p: Pathway, pathId: string): PathNode[] {
+  const own = live(p, scopeNodes(p, pathId, null))
+  const out = [...own]
+  const seen = new Set(own.map((n) => n.id))
+  const queue = own.filter(isBranch)
+  while (queue.length) {
+    const fork = queue.shift()!
+    const j = jumpOf(fork)
+    const target = j && p.nodes.find((n) => n.id === j.nodeId && n.parentId === null)
+    if (!target || seen.has(target.id)) continue
+    // everything on the other path that follows from the step you start at
+    const rest = new Map<string, PathNode>([[target.id, target]])
+    const stack = [target.id]
+    while (stack.length) {
+      const cur = stack.pop()!
+      for (const n of p.nodes) if (n.parentId === null && n.pathId === target.pathId && n.dependsOn.includes(cur) && !rest.has(n.id)) (rest.set(n.id, n), stack.push(n.id))
+    }
+    for (const n of live(p, [...rest.values()])) {
+      if (seen.has(n.id)) continue
+      seen.add(n.id)
+      const copy = { ...n, dependsOn: n.id === target.id ? [fork.id] : n.dependsOn.filter((d) => rest.has(d)) }
+      out.push(copy)
+      if (isBranch(n)) queue.push(copy)
+    }
+  }
+  return out
+}
+
+/** Route steps plus everything inside them. */
+function withInside(p: Pathway, roots: PathNode[]) {
+  const out = [...roots]
+  const stack = [...roots]
+  while (stack.length) for (const k of kidsOf(p, stack.pop()!.id)) (out.push(k), stack.push(k))
+  return out
+}
+
 /** Planned duration of a step. A step with sub-steps lasts as long as its sub-path. */
 export function nodeDuration(p: Pathway, n: PathNode, depth = 0): number {
   const kids = kidsOf(p, n.id)
@@ -175,8 +216,8 @@ export function pathMetrics(pw: Pathway, pathId: string, today = new Date()): Pa
   // with branch points, plan along the future the plan assumes; the spread comes from `futures`
   const fut = futures(pw, pathId)
   const p = fut ? assume(pw, new Map(Object.entries(fut.planning))) : pw
-  const nodes = live(p, scopeNodes(p, pathId, null))
-  const all = live(p, p.nodes.filter((n) => n.pathId === pathId))
+  const nodes = routeOf(p, pathId)
+  const all = withInside(p, nodes)
   const { map, total } = schedule(p, nodes)
   const remaining = schedule(p, nodes, 0, (n) => nodeDuration(p, n) * (1 - workDone(p, n))).total
   const expectedDays = fut ? fut.expectedDays : schedule(p, nodes, 0, (n) => expectedRemaining(p, n)).total
@@ -321,14 +362,14 @@ function computeFutures(p: Pathway, pathId: string): Futures | null {
   const chanceSets = combos(chance.map((n) => normalised(n.branch!).map((o) => ({ id: n.id, outcome: o.id, p: o.probability }))), MAX_CHANCE, pathId)
   const choiceSets = combos(choice.map((n) => n.branch!.outcomes.map((o) => ({ id: n.id, outcome: o.id, p: 1 }))), MAX_CHOICE, pathId + ':c')
 
-  type Run = { assign: Map<string, string>; prob: number; days: number; success: number; q: Pathway }
+  type Run = { assign: Map<string, string>; prob: number; days: number; success: number; q: Pathway; route: PathNode[] }
   const evaluate = (c: Pick[]) =>
     chanceSets.map((ch): Run => {
       const assign = new Map([...c, ...ch.picks].map((x) => [x.id, x.outcome]))
       const q = assume(p, assign)
-      const all = live(q, q.nodes.filter((n) => n.pathId === pathId))
-      const roots = all.filter((n) => n.parentId === null)
-      return { assign, prob: ch.weight, q, days: schedule(q, roots, 0, (n) => expectedRemaining(q, n)).total, success: successOf(q, all) }
+      const roots = routeOf(q, pathId)
+      const all = withInside(q, roots)
+      return { assign, prob: ch.weight, q, route: all, days: schedule(q, roots, 0, (n) => expectedRemaining(q, n)).total, success: successOf(q, all) }
     })
   const mean = (runs: Run[]) => {
     const w = runs.reduce((a, r) => a + r.prob, 0) || 1
@@ -357,10 +398,7 @@ function computeFutures(p: Pathway, pathId: string): Futures | null {
   // how likely each step is to happen at all
   const reach: Record<string, number> = {}
   for (const n of p.nodes) if (n.pathId === pathId) reach[n.id] = 0
-  for (const r of runs) {
-    const dead = deadSet(r.q)
-    for (const id of Object.keys(reach)) if (!dead.has(id)) reach[id] += r.prob
-  }
+  for (const r of runs) for (const n of r.route) reach[n.id] = (reach[n.id] ?? 0) + r.prob
 
   // distinct futures: only the branch points that are actually reached in each count
   const merged = new Map<string, FutureScenario>()

@@ -1,6 +1,6 @@
 import { memo, useState } from 'react'
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type Edge, type EdgeProps } from '@xyflow/react'
-import { Check, GitFork, Plus } from 'lucide-react'
+import { Check, GitFork, Plus, Shuffle } from 'lucide-react'
 import type { FlowEdgeData } from '../lib/layout'
 import { addStep } from '../lib/actions'
 import { openMenu } from './ContextMenu'
@@ -54,7 +54,7 @@ export const FlowEdge = memo(function FlowEdge(props: EdgeProps<Edge<FlowEdgeDat
             style={{ transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`, '--c': data.color, opacity: Math.max(op, 0.45) } as React.CSSProperties}
             title={
               oc.state === 'open'
-                ? `${oc.mode === 'chance' ? `${Math.round(oc.probability * 100)}% chance` : 'An option'}: ${oc.label}${oc.days !== undefined ? ` — about ${Math.round(oc.days)} days to the goal this way` : ''}${oc.planned ? ' (the plan assumes this)' : ''}`
+                ? `${oc.mode === 'chance' ? `${Math.round(oc.probability * 100)}% chance` : 'An option'}: ${oc.label}${oc.jump ? ` — switch to ${oc.jump} from here` : ''}${oc.days !== undefined ? ` — about ${Math.round(oc.days)} days to the goal this way` : ''}${oc.planned ? ' (the plan assumes this)' : ''}`
                 : oc.state === 'taken'
                   ? `This is what happened: ${oc.label}`
                   : `Didn’t happen: ${oc.label}`
@@ -64,6 +64,11 @@ export const FlowEdge = memo(function FlowEdge(props: EdgeProps<Edge<FlowEdgeDat
           >
             {oc.state === 'taken' ? <Check size={10} strokeWidth={3} /> : oc.mode === 'chance' ? <b>{Math.round(oc.probability * 100)}%</b> : <GitFork size={10} />}
             <span className="op-label">{oc.label}</span>
+            {oc.jump && (
+              <span className="op-jump">
+                <Shuffle size={9} /> {oc.jump}
+              </span>
+            )}
             {oc.state === 'open' && oc.days !== undefined && <span className="op-days">~{Math.round(oc.days)}d</span>}
           </button>
         </EdgeLabelRenderer>

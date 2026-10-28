@@ -1,4 +1,5 @@
 import { uid, type Op } from '../../shared/ops'
+import { settleOps } from '../../shared/branches'
 import { PATH_COLORS, type NodeKind, type PathNode } from '../../shared/types'
 import { useStore } from '../store'
 
@@ -163,13 +164,49 @@ export function addOutcome(n: PathNode) {
 
 /** Say which way a fork went (or which option you chose). null = not settled yet. */
 export function settleFork(n: PathNode, outcomeId: string | null) {
-  if (!n.branch) return
-  const ops: Op[] = []
-  const done = n.status === 'done' || n.status === 'skipped'
-  // knowing what happened means the step itself is behind you
-  if (outcomeId && !done && (n.branch.mode === 'chance' || n.kind === 'decision')) ops.push({ t: 'node.complete', id: n.id })
-  ops.push({ t: 'node.update', id: n.id, patch: { branch: { ...n.branch, resolved: outcomeId ?? undefined } } })
-  st().dispatch(ops)
+  const doc = st().doc
+  if (!doc || !n.branch) return
+  st().dispatch(settleOps(doc, n, outcomeId))
+}
+
+/**
+ * "If this happens, switch to that path and start at that step." On a step
+ * that isn't a fork yet, the way it already goes becomes the likely outcome.
+ */
+export function addJump(n: PathNode, target: PathNode) {
+  const doc = st().doc
+  if (!doc) return
+  const toPath = doc.paths.find((p) => p.id === target.pathId)
+  const jump = { id: uid(), label: `Switch to ${toPath?.name ?? 'another path'}`, probability: 0.3, jumpTo: { pathId: target.pathId, nodeId: target.id } }
+  if (n.branch?.outcomes.length) {
+    st().dispatch([{ t: 'node.update', id: n.id, patch: { branch: { ...n.branch, outcomes: [...n.branch.outcomes, { ...jump, probability: 0.2 }] } } }])
+  } else {
+    const stay = uid()
+    const next = doc.nodes.filter((x) => x.parentId === n.parentId && x.dependsOn.includes(n.id) && !x.outcomeOf)
+    st().dispatch([
+      { t: 'node.update', id: n.id, patch: { branch: { mode: 'chance', outcomes: [{ id: stay, label: 'Goes as planned', probability: 0.7 }, jump] } } },
+      // what already came next is what happens when it goes as planned
+      ...next.map((x): Op => ({ t: 'node.update', id: x.id, patch: { outcomeOf: stay } })),
+    ])
+  }
+  st().select(n.id)
+}
+
+/** Point an outcome at another path's step (replacing its own steps), or back at steps of its own. */
+export function setOutcomeTarget(n: PathNode, outcomeId: string, target: PathNode | null) {
+  const doc = st().doc
+  if (!doc || !n.branch) return
+  const outcomes = n.branch.outcomes.map((o) => (o.id === outcomeId ? { ...o, jumpTo: target ? { pathId: target.pathId, nodeId: target.id } : undefined } : o))
+  const own = doc.nodes.filter((x) => x.outcomeOf === outcomeId)
+  const label = n.branch.outcomes.find((o) => o.id === outcomeId)?.label ?? 'New step'
+  st().dispatch([
+    { t: 'node.update', id: n.id, patch: { branch: { ...n.branch, outcomes } } },
+    ...(target
+      ? own.map((x): Op => ({ t: 'node.delete', id: x.id }))
+      : own.length
+        ? []
+        : [{ t: 'node.add', node: { id: uid(), pathId: n.pathId, parentId: n.parentId, title: label, dependsOn: [n.id], outcomeOf: outcomeId } } as Op]),
+  ])
 }
 
 /** Remove the fork: the outcome steps stay, as ordinary steps. */

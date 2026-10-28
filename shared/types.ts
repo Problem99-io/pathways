@@ -50,6 +50,8 @@ export interface Outcome {
   /** For chance branches: how likely this outcome is (0..1, normalised across the outcomes). */
   probability: number
   description?: string
+  /** Instead of steps of its own, this future switches to another path, starting at one of its steps. */
+  jumpTo?: { pathId: string; nodeId: string }
 }
 
 /** A fork in a path: after this step, the future can go several ways. */

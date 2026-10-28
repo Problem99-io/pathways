@@ -39,14 +39,15 @@ import {
   MessageSquare,
   Split,
   Dices,
+  Shuffle,
 } from 'lucide-react'
 import { rankByGoal } from '../../shared/metrics'
 import { uid, type Op } from '../../shared/ops'
 import { PATH_COLORS, type NodeKind, type NodeStatus, type PathNode, type Pathway } from '../../shared/types'
 import { mePerson, myName, useStore } from '../store'
-import { addFutures, addNext, addOutcome, addParallel, addStep, complete, drillInto, forkFrom, newPath, pursue, removeFutures, removeStep, setCurrent, settleFork } from '../lib/actions'
+import { addFutures, addJump, addNext, addOutcome, addParallel, addStep, complete, drillInto, forkFrom, newPath, pursue, removeFutures, removeStep, setCurrent, settleFork } from '../lib/actions'
 import { normalised } from '../../shared/branches'
-import { pathMetrics } from '../../shared/metrics'
+import { pathMetrics, topo } from '../../shared/metrics'
 import { fmtDate, KIND_LABEL, STATUS_LABEL } from '../lib/format'
 import type { FlowEdgeData } from '../lib/layout'
 import type { MenuEntry, MenuItem, MenuSpec } from './ContextMenu'
@@ -184,6 +185,7 @@ function stepMenu(doc: Pathway, id: string): MenuSpec | null {
           items: [
             { id: 'chance', label: 'It could go several ways', icon: Dices, run: () => addFutures(n, 'chance') },
             { id: 'choice', label: 'I’ll choose between options', icon: Split, run: () => addFutures(n, 'choice') },
+            { id: 'jump', label: 'If something happens, switch to…', icon: Shuffle, items: jumpTargets(doc, n), disabled: !jumpTargets(doc, n).length },
             '-',
             {
               id: 'ai-futures',
@@ -244,18 +246,36 @@ function settleEntries(doc: Pathway, n: PathNode): MenuEntry[] {
     const days = f?.byOutcome[o.id]?.days
     return {
       id: o.id,
-      label: `${b.mode === 'chance' ? `${Math.round(o.probability * 100)}% · ` : ''}${o.label}${!b.resolved && days !== undefined ? ` · ~${Math.round(days)}d` : ''}`,
+      label: `${b.mode === 'chance' ? `${Math.round(o.probability * 100)}% · ` : ''}${o.label}${o.jumpTo ? ` → ${doc.paths.find((x) => x.id === o.jumpTo!.pathId)?.name ?? 'another path'}` : ''}${!b.resolved && days !== undefined ? ` · ~${Math.round(days)}d` : ''}`,
       checked: b.resolved === o.id,
       icon: b.mode === 'chance' ? Dices : Split,
       run: () => settleFork(n, o.id),
     }
   })
   out.push('-')
+  const targets = jumpTargets(doc, n)
+  if (targets.length) out.push({ id: 'jump', label: 'Add a switch to another path', icon: Shuffle, items: targets })
   if (b.resolved) out.push({ id: 'unsettle', label: 'Not settled yet', icon: RotateCcw, run: () => settleFork(n, null) })
   out.push({ id: 'more', label: 'Add another outcome', icon: Plus, run: () => addOutcome(n) })
   out.push({ id: 'edit', label: 'Edit odds & outcomes', icon: PenLine, run: () => st().select(n.id) })
   out.push({ id: 'unfork', label: 'Remove the fork', icon: Trash2, danger: true, confirm: 'Click again — steps stay', run: () => removeFutures(n) })
   return out
+}
+
+/** Other paths, and the step on each you could switch to. */
+function jumpTargets(doc: Pathway, n: PathNode): MenuEntry[] {
+  return doc.paths
+    .filter((p) => p.id !== n.pathId && p.status !== 'archived')
+    .map((p) => {
+      const steps = topo(doc.nodes.filter((x) => x.pathId === p.id && x.parentId === null))
+      return {
+        id: p.id,
+        label: p.name,
+        color: p.color,
+        disabled: !steps.length,
+        items: steps.map((x) => ({ id: x.id, label: x.title, icon: x.status === 'done' ? Check : ArrowRight, run: () => addJump(n, x) })),
+      } satisfies MenuItem
+    })
 }
 
 function settleMenu(doc: Pathway, id: string): MenuSpec | null {

@@ -113,6 +113,7 @@ Use `branch_step` on the step whose result is uncertain:
 - **choice** when the user will decide between options. The app plans along the quickest option until they choose, and shows each option's expected days.
 - Each outcome gets its own `steps`, which is what you'd do *in that future*. The failure future still needs a plan: a fallback, a pivot, or a slower route. Don't leave it empty.
 - Default `rejoin: "next"`: whatever already came after the fork waits for whichever future happens, so the branches merge back. Use `"none"` when the futures diverge for good.
+- **Paths can intertwine.** An outcome can switch to another path instead of having steps of its own: `switchTo: { pathId, stepId }`. Use this when the real plan is "start on A, which is the better bet, but if X happens move to plan B, already partway in". For example: run services first, and if the big client leaves, switch to the build-in-public path at "Launch to waitlist". Pick the step on B that A's work has already earned, not B's first step. Pair it with an outcome that has `continueAsPlanned: true`, which makes A's existing next steps the "goes as planned" future. When it's settled, the user moves onto B at that step, and B's earlier steps are skipped.
 - Forks inside forks are fine, for example "if the seed round fails → apply to the accelerator → accepted / rejected". Keep each tree shallow enough to read.
 
 ```json
@@ -121,6 +122,13 @@ Use `branch_step` on the step whose result is uncertain:
     { "title": "Close the round and hire 2 engineers", "durationDays": 30, "confidence": 0.8 } ] },
   { "label": "No round — bootstrap", "probability": 0.75, "steps": [
     { "title": "Sell 3 design-system audits to fund the build", "durationDays": 45, "confidence": 0.7 } ] }
+] }
+```
+
+```json
+{ "stepId": "<Sign the anchor client>", "outcomes": [
+  { "label": "Goes as planned", "probability": 0.7, "continueAsPlanned": true },
+  { "label": "Client walks — go to Plan B", "probability": 0.3, "switchTo": { "pathId": "<Plan B>", "stepId": "<Launch to waitlist>" } }
 ] }
 ```
 
