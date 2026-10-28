@@ -123,3 +123,7 @@ scripts/  demo seeding via MCP
 Environment variables: `PATHWAYS_DIR` (workspace folder), `PATHWAYS_PORT` (API port, default 4317), `PATHWAYS_URL` (for the stdio MCP server and the demo script).
 
 `npm start` builds the app and serves everything from port 4317.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
