@@ -1,0 +1,92 @@
+// Branch points: steps after which the future can go several ways. A step
+// that begins an outcome's branch has `outcomeOf`; everything downstream of
+// it belongs to that branch until branches merge again (a step that depends
+// on the ends of several branches happens whichever way things went).
+//
+// "Dead" steps are ones that won't happen given which outcome is selected at
+// each branch point: the one that happened or was chosen, else the one being
+// assumed for a scenario, else the default (most likely / first option).
+
+import type { Branch, Outcome, PathNode, Pathway } from './types'
+
+/** Outcomes with probabilities that add up to 1 (choices weigh equally). */
+export function normalised(b: Branch): Outcome[] {
+  if (b.mode === 'choice') return b.outcomes.map((o) => ({ ...o, probability: 1 / Math.max(1, b.outcomes.length) }))
+  const sum = b.outcomes.reduce((a, o) => a + Math.max(0, o.probability || 0), 0)
+  return b.outcomes.map((o) => ({ ...o, probability: sum > 0 ? Math.max(0, o.probability || 0) / sum : 1 / b.outcomes.length }))
+}
+
+export function defaultOutcome(b: Branch): string | undefined {
+  if (!b.outcomes.length) return undefined
+  if (b.mode === 'choice') return b.outcomes[0].id
+  return normalised(b).reduce((a, o) => (o.probability > a.probability ? o : a)).id
+}
+
+export const isBranch = (n: PathNode) => !!n.branch && n.branch.outcomes.length > 0
+export const selectedOutcome = (n: PathNode) => (n.branch ? n.branch.resolved ?? n.branch.assumed ?? defaultOutcome(n.branch) : undefined)
+
+const indexCache = new WeakMap<PathNode[], Map<string, PathNode>>()
+/** outcome id → the branch step it belongs to */
+export function outcomeIndex(p: Pathway): Map<string, PathNode> {
+  let m = indexCache.get(p.nodes)
+  if (!m) {
+    m = new Map()
+    for (const n of p.nodes) for (const o of n.branch?.outcomes ?? []) m.set(o.id, n)
+    indexCache.set(p.nodes, m)
+  }
+  return m
+}
+
+type Mode = 'selected' | 'resolved'
+const deadCache = new WeakMap<PathNode[], Partial<Record<Mode, Set<string>>>>()
+
+/**
+ * Steps that won't happen.
+ * selected: given the selected outcome at every branch point (see top).
+ * resolved: only counting branch points that have actually been settled.
+ */
+export function deadSet(p: Pathway, mode: Mode = 'selected'): Set<string> {
+  const cached = deadCache.get(p.nodes)?.[mode]
+  if (cached) return cached
+  const byId = new Map(p.nodes.map((n) => [n.id, n]))
+  const idx = outcomeIndex(p)
+  const memo = new Map<string, boolean>()
+  const dead = (id: string): boolean => {
+    const known = memo.get(id)
+    if (known !== undefined) return known
+    memo.set(id, false) // cycle guard
+    const n = byId.get(id)
+    if (!n) return false
+    let d = !!n.parentId && byId.has(n.parentId) && dead(n.parentId)
+    if (!d && n.outcomeOf) {
+      const b = idx.get(n.outcomeOf)
+      if (b) d = dead(b.id) || (mode === 'resolved' ? !!b.branch!.resolved && b.branch!.resolved !== n.outcomeOf : selectedOutcome(b) !== n.outcomeOf)
+    }
+    if (!d) {
+      const deps = n.dependsOn.filter((x) => byId.has(x))
+      // a step happens if any of the ways into it happens
+      if (deps.length && deps.every(dead)) d = true
+    }
+    memo.set(id, d)
+    return d
+  }
+  const out = new Set(p.nodes.filter((n) => dead(n.id)).map((n) => n.id))
+  deadCache.set(p.nodes, { ...deadCache.get(p.nodes), [mode]: out })
+  return out
+}
+
+/** The same pathway, assuming these outcomes at these (unsettled) branch points. */
+export function assume(p: Pathway, assign: Map<string, string>): Pathway {
+  if (!assign.size) return p
+  return {
+    ...p,
+    nodes: p.nodes.map((n) => (n.branch && !n.branch.resolved && assign.has(n.id) ? { ...n, branch: { ...n.branch, assumed: assign.get(n.id) } } : n)),
+  }
+}
+
+/** Branch the step is waiting on: outcome steps can't start until their branch is settled. */
+export function waitingOnBranch(p: Pathway, n: PathNode): PathNode | null {
+  if (!n.outcomeOf) return null
+  const b = outcomeIndex(p).get(n.outcomeOf)
+  return b && b.branch!.resolved !== n.outcomeOf ? b : null
+}
