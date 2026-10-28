@@ -131,8 +131,14 @@ export function settleOps(p: Pathway, fork: PathNode, outcomeId: string | null):
   const target = jump && p.nodes.find((n) => n.id === jump.nodeId)
   if (target) {
     for (const a of ancestorsOf(p, target.id)) if (!done(a)) ops.push({ t: 'node.update', id: a.id, patch: { status: 'skipped' } })
+    const from = p.paths.find((x) => x.id === fork.pathId)
+    const to = p.paths.find((x) => x.id === target.pathId)
+    const goal = p.goals.find((g) => g.id === from?.goalId)
+    // the playbook stays the one you opened with: this play, then the backup you switched to
+    if (goal && goal.opening === undefined && from?.pursuing && to?.goalId === goal.id && p.paths.filter((x) => x.goalId === goal.id && x.pursuing && x.status !== 'archived').length === 1)
+      ops.push({ t: 'goal.update', id: goal.id, patch: { opening: from.id } })
     ops.push({ t: 'current.set', nodeId: target.id, pathId: target.pathId })
-    if (p.paths.find((x) => x.id === fork.pathId)?.pursuing) ops.push({ t: 'path.pursue', id: fork.pathId, on: false })
+    if (from?.pursuing) ops.push({ t: 'path.pursue', id: fork.pathId, on: false })
   }
   return ops
 }

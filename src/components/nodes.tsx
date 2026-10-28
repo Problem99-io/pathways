@@ -1,9 +1,9 @@
 import { memo, useState } from 'react'
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import { AnimatePresence, motion } from 'motion/react'
-import { CalendarClock, Check, ChevronDown, Zap, Flag, Play, Pause, CornerDownRight, Layers, Lock, Paperclip, Plus, Repeat, Sparkles, Target, MapPin, Split } from 'lucide-react'
+import { CalendarClock, Check, ChevronDown, Zap, Flag, Play, Pause, CornerDownRight, Layers, Lock, Paperclip, Plus, Repeat, Sparkles, Target, MapPin, Split, BookOpen } from 'lucide-react'
 import { openMenu } from './ContextMenu'
-import type { GhostData, GoalData, LaneData, StartData, StepData } from '../lib/layout'
+import type { GhostData, GoalData, LaneData, LanePlay, StartData, StepData } from '../lib/layout'
 import { AvatarStack, KIND_ICON, softSpring } from './ui'
 import { fmtDate, fmtDays, fmtPct, KIND_LABEL } from '../lib/format'
 import { addNext, addParallel, addStep, drillInto, pursue } from '../lib/actions'
@@ -31,6 +31,7 @@ export const StepNode = memo(function StepNode({ data, selected }: NodeProps<Nod
     data.expected && 'expected',
     data.hl && `hl-${data.hl}`,
     data.fate !== 'live' && `fate-${data.fate}`,
+    data.bench && 'bench',
     data.fork && 'is-fork',
   ]
     .filter(Boolean)
@@ -280,6 +281,12 @@ export const GoalNode = memo(function GoalNode({ data }: NodeProps<Node<GoalData
         {g?.deadline && <span className="goal-deadline">by {fmtDate(g.deadline)}</span>}
       </div>
       <div className="goal-title">{g?.title}</div>
+      {data.book && (
+        <div className="goal-book">
+          <BookOpen size={10} /> playbook · opens with <b style={{ color: data.book.color }}>{data.book.opening}</b>
+          {data.book.backups > 0 && <> · {data.book.backups} backup{data.book.backups === 1 ? '' : 's'}</>}
+        </div>
+      )}
       {data.best ? (
         <div className="goal-best">
           <span className="dot" style={{ background: data.best.color }} />
@@ -324,7 +331,7 @@ export const LaneNode = memo(function LaneNode({ data }: NodeProps<Node<LaneData
   }
   return (
     <motion.div
-      className={`lane-label ${data.hl ? `hl-${data.hl}` : ''} ${path.status === 'proposed' ? 'proposed' : ''}`}
+      className={`lane-label ${data.hl ? `hl-${data.hl}` : ''} ${path.status === 'proposed' ? 'proposed' : ''} ${data.play ? `play-${data.play.role}` : ''}`}
       style={{ '--c': path.color } as React.CSSProperties}
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
@@ -358,6 +365,7 @@ export const LaneNode = memo(function LaneNode({ data }: NodeProps<Node<LaneData
         <span className="lane-name">{path.name}</span>
       )}
       {path.status === 'proposed' && <span className="tag-ai">proposal</span>}
+      {data.play && <PlayTag play={data.play} />}
       <button
         className={`lane-pursue nodrag ${path.pursuing ? 'on' : ''}`}
         title={path.pursuing ? 'You are pursuing this path. Click to pause it' : 'Pursue this path: track where you are on it'}
@@ -373,7 +381,7 @@ export const LaneNode = memo(function LaneNode({ data }: NodeProps<Node<LaneData
           </>
         ) : (
           <>
-            <Play size={9} /> pursue
+            <Play size={9} /> {data.opener ? 'start with this' : 'pursue'}
           </>
         )}
       </button>
@@ -407,6 +415,34 @@ export const LaneNode = memo(function LaneNode({ data }: NodeProps<Node<LaneData
     </motion.div>
   )
 })
+
+/** Where this path sits in the goal's playbook. */
+function PlayTag({ play }: { play: LanePlay }) {
+  if (play.role === 'opening') return <span className="play-tag opening" title="The play you open with. The goal’s other paths are backups you switch to when a fork goes their way.">opening play</span>
+  if (play.role === 'unused')
+    return (
+      <span className="play-tag unused" title="No fork in the playbook switches to this path. Add a future that switches here to make it a backup, or start with it instead.">
+        not in the playbook
+      </span>
+    )
+  const v = play.via
+  return (
+    <span
+      className="play-tag backup"
+      title={`${v ? `Switch here from “${v.forkTitle}” on ${v.fromName} if “${v.label}”.` : ''}${play.ways > 1 ? ` ${play.ways} ways in.` : ''}${play.skipped ? ` Its first ${play.skipped} step${play.skipped === 1 ? '' : 's'} are skipped when you switch in, so they’re hidden.` : ''}`}
+    >
+      <CornerDownRight size={10} /> backup
+      {v && (
+        <>
+          {' '}· if <b>{v.label}</b>
+          {v.mode === 'chance' && <span className="faint"> {fmtPct(v.probability)}</span>}
+        </>
+      )}
+      {play.ways > 1 && <span className="faint"> · {play.ways} ways in</span>}
+      {play.skipped > 0 && <span className="faint"> · skips {play.skipped}</span>}
+    </span>
+  )
+}
 
 export function YouAreHerePin({ label }: { label?: string }) {
   return (

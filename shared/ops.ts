@@ -158,7 +158,10 @@ export function applyOp(p: Pathway, op: Op, now = nowIso()): void {
     case 'goal.update': {
       const g = p.goals.find((x) => x.id === op.id)
       if (!g) throw new OpError(`Unknown goal "${op.id}"`)
+      if (op.patch.opening && !p.paths.some((x) => x.id === op.patch.opening && x.goalId === g.id)) throw new OpError(`Path "${op.patch.opening}" doesn't lead to that goal`)
       Object.assign(g, op.patch)
+      // "" goes back to "the path you're pursuing"
+      if (op.patch.opening === '') delete g.opening
       return
     }
     case 'goal.delete': {
@@ -191,6 +194,7 @@ export function applyOp(p: Pathway, op: Op, now = nowIso()): void {
     case 'path.delete': {
       findPath(p, op.id)
       p.paths = p.paths.filter((x) => x.id !== op.id)
+      for (const g of p.goals) if (g.opening === op.id) delete g.opening
       const gone = new Set(p.nodes.filter((n) => n.pathId === op.id).map((n) => n.id))
       p.nodes = p.nodes.filter((n) => !gone.has(n.id))
       if (p.currentNodeId && gone.has(p.currentNodeId)) p.currentNodeId = null
@@ -469,6 +473,7 @@ export function applyOps<T extends Pathway>(p: T, ops: Op[], now = nowIso()): T 
 export function describeOps(p: Pathway, ops: Op[]): string {
   const name = (id: string) => `"${p.nodes.find((n) => n.id === id)?.title ?? id}"`
   const pathName = (id: string) => `"${p.paths.find((x) => x.id === id)?.name ?? id}"`
+  const goalName = (id: string) => `"${p.goals.find((x) => x.id === id)?.title ?? id}"`
   const adds = ops.filter((o) => o.t === 'node.add')
   if (adds.length > 1) {
     const paths = [...new Set(adds.map((o) => (o as { node: NodeInput }).node.pathId))]
@@ -485,6 +490,8 @@ export function describeOps(p: Pathway, ops: Op[]): string {
       case 'goal.add':
         return `added goal "${op.goal.title}"`
       case 'goal.update':
+        if (op.patch.opening) return `opened ${goalName(op.id)} with ${pathName(op.patch.opening)}`
+        if (op.patch.opening !== undefined) return op.patch.opening === null ? `showed the paths to ${goalName(op.id)} side by side` : `made a playbook for ${goalName(op.id)}`
         return `edited goal "${p.goals.find((g) => g.id === op.id)?.title ?? op.id}"`
       case 'goal.delete':
         return `removed goal "${p.goals.find((g) => g.id === op.id)?.title ?? op.id}"`

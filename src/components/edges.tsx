@@ -1,18 +1,24 @@
 import { memo, useState } from 'react'
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type Edge, type EdgeProps } from '@xyflow/react'
 import { Check, GitFork, Plus, Shuffle } from 'lucide-react'
-import type { FlowEdgeData } from '../lib/layout'
+import { PILL_GAP, type FlowEdgeData } from '../lib/layout'
 import { addStep } from '../lib/actions'
 import { openMenu } from './ContextMenu'
 
 const FOG_OPACITY = [1, 0.55, 0.25, 0.1]
+const PILL_ROW = 28
 
 export const FlowEdge = memo(function FlowEdge(props: EdgeProps<Edge<FlowEdgeData, 'flow'>>) {
   const { sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, id } = props
   const [hover, setHover] = useState(false)
-  const [d, lx, ly] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, curvature: 0.35 })
+  const oc = data?.outcome
+  // a future leaves its fork through its pill, in the column right after the step, then goes where it leads
+  const px = sourceX + PILL_GAP
+  const py = oc ? sourceY + (oc.slot.i - (oc.slot.k - 1) / 2) * PILL_ROW : sourceY
+  const out = oc ? px + oc.slot.w : sourceX
+  const [rest, lx, ly] = getBezierPath({ sourceX: out, sourceY: py, targetX, targetY, sourcePosition, targetPosition, curvature: 0.35 })
+  const d = oc ? `M${sourceX},${sourceY} C${sourceX + PILL_GAP * 0.6},${sourceY} ${px - PILL_GAP * 0.6},${py} ${px},${py} L${out},${py} ${rest.replace(/^M[^C]*/, '')}` : rest
   if (!data) return null
-  const oc = data.outcome
   // futures that didn't happen fade; other possible futures stay visible but quiet
   const fateOp = data.fate === 'gone' ? 0.3 : data.fate === 'alt' ? 0.75 : 1
   const op = (data.hl === 'off' ? 0.08 : FOG_OPACITY[data.fog]) * fateOp
@@ -47,11 +53,11 @@ export const FlowEdge = memo(function FlowEdge(props: EdgeProps<Edge<FlowEdgeDat
           </>
         )}
       </g>
-      {oc && data.hl !== 'off' && data.fog < 3 && (
+      {oc && oc.pill && data.hl !== 'off' && data.fog < 3 && (
         <EdgeLabelRenderer>
           <button
             className={`outcome-pill nodrag nopan ${oc.state} ${oc.planned ? 'planned' : ''} ${oc.mode}`}
-            style={{ transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`, '--c': data.color, opacity: Math.max(op, 0.45) } as React.CSSProperties}
+            style={{ left: px, top: py, width: oc.slot.w, '--c': data.color, opacity: Math.max(op, 0.45) } as React.CSSProperties}
             title={
               oc.state === 'open'
                 ? `${oc.mode === 'chance' ? `${Math.round(oc.probability * 100)}% chance` : 'An option'}: ${oc.label}${oc.jump ? ` — switch to ${oc.jump} from here` : ''}${oc.days !== undefined ? ` — about ${Math.round(oc.days)} days to the goal this way` : ''}${oc.planned ? ' (the plan assumes this)' : ''}`

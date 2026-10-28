@@ -1,4 +1,5 @@
 import { uid, type Op } from '../../shared/ops'
+import { openWithOps } from '../../shared/playbook'
 import { settleOps } from '../../shared/branches'
 import { PATH_COLORS, type NodeKind, type PathNode } from '../../shared/types'
 import { useStore } from '../store'
@@ -93,6 +94,20 @@ export function setCurrent(id: string | null, pathId?: string) {
 
 export function pursue(pathId: string, on: boolean) {
   st().dispatch([{ t: 'path.pursue', id: pathId, on }])
+}
+
+/**
+ * Open with this path: it's the play you start on toward its goal, and the
+ * goal's other paths become backups you switch to when a fork goes their way.
+ */
+export function openWith(pathId: string) {
+  const doc = st().doc
+  if (doc) st().dispatch(openWithOps(doc, pathId))
+}
+
+/** Show a goal's paths as a playbook (from the path you're on) or side by side. */
+export function setPlaybook(goalId: string, on: boolean) {
+  st().dispatch([{ t: 'goal.update', id: goalId, patch: { opening: on ? '' : null } }])
 }
 
 export function drillInto(n: PathNode) {

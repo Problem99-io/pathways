@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { rankByGoal, rankPaths, pathMetrics, children, planningView, type Futures } from '../shared/metrics'
 import { deadSet, normalised, outcomeIndex, settleOps } from '../shared/branches'
 import { forward } from '../shared/forward'
+import { openWithOps, playbook } from '../shared/playbook'
 import { uid, type Op } from '../shared/ops'
 import type { Actor, PathNode, PathwayDoc, PathwaySummary } from '../shared/types'
 
@@ -247,6 +248,7 @@ export function pathwayView(doc: PathwayDoc) {
       deadline: g.deadline,
       quickestPath: ranking[g.id]?.quickest,
       mostLikelyPath: ranking[g.id]?.mostLikely,
+      playbook: playbookView(doc, g.id),
     })),
     context: doc.context,
     /** The most recently moved position. Each path also has its own youAreHere. */
@@ -292,6 +294,24 @@ export function pathwayView(doc: PathwayDoc) {
   }
 }
 
+/** The goal's paths as a playbook: the one the user opens with, the backups forks switch to, and the rest. */
+function playbookView(doc: PathwayDoc, goalId: string) {
+  const b = playbook(doc, goalId)
+  if (!b.opening) return b.plays.length > 1 ? { opening: null, note: 'No opening play picked yet: the paths are shown side by side. The user picks one to start with (set_goal openingPathId when they ask).' } : undefined
+  const title = (id: string) => doc.nodes.find((n) => n.id === id)?.title
+  return {
+    opening: b.opening.id,
+    backups: b.plays
+      .filter((x) => x.role === 'backup')
+      .map((x) => ({
+        pathId: x.path.id,
+        waysIn: x.ways.map((w) => ({ fromPathId: w.fromPathId, forkStepId: w.forkId, fork: w.forkTitle, ifOutcome: w.label, chance: w.mode === 'chance' ? Math.round(w.probability * 100) / 100 : undefined, startsAt: title(w.nodeId), state: w.state })),
+        skippedWhenSwitchingIn: x.leadIn.map(title),
+      })),
+    notInPlaybook: b.plays.filter((x) => x.role === 'unused').map((x) => x.path.id),
+  }
+}
+
 function futuresView(f: Futures | null) {
   if (!f) return undefined
   return {
@@ -309,6 +329,7 @@ const fail = (e: unknown) => ({ isError: true, content: [{ type: 'text' as const
 export const MCP_INSTRUCTIONS = `Pathways is a visual planning graph that runs on the user's computer: where they are now (left) → steps → their goals (right).
 A pathway can have several GOALS, and each goal several alternative PATHS that compete to reach it. Steps can have sub-steps (drill-down) and can be RECURRING loops (ongoing work like growing social media).
 A step can be a FORK (branch_step): after it the future can go several ways — chance outcomes with probabilities, or choices — each leading to its own steps. The app predicts across every combination (expected days, best/worst, chance each step happens). When reality picks a way, settle_branch.
+A goal's paths form a PLAYBOOK: the user opens with one, and the others stay as backup plays that forks switch to (switchTo) when things go their way. Build that: give each path's risky forks outcomes that switchTo the right step of a sibling path. Paths no fork reaches show as "not in the playbook".
 The user can pursue several paths and goals at the same time; each path has its own "you are here". get_forward shows what's next across all of them.
 Workflow: get_pathway → read context, openRequests and recentChanges → create_path several times with genuinely different strategies (status "proposed") → compare_paths → explain the trade-offs.
 When things change, record_signal and re-plan: update_step, add_steps, fork_path. Changes appear live in the app. Use the "pathways" skill for the full method.`
@@ -435,19 +456,30 @@ export function buildMcpServer(api: Api, clientName?: () => string | undefined) 
         title: z.string().optional(),
         description: z.string().optional(),
         deadline: z.string().optional().describe('ISO date'),
+        openingPathId: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("The path the user opens with (only when they've picked it). Its goal's other paths become backup plays, reached through forks that switchTo them. null = show the paths side by side."),
         remove: z.boolean().optional(),
       },
     },
-    async ({ pathwayId, goalId, remove, ...fields }) => {
+    async ({ pathwayId, goalId, remove, openingPathId, ...fields }) => {
       try {
         const id = goalId ?? uid()
-        await run(pathwayId, (): Op[] => {
+        await run(pathwayId, (doc): Op[] => {
           if (!goalId) {
             if (!fields.title) throw new Error('title is required for a new goal')
             return [{ t: 'goal.add', goal: { id, title: fields.title, description: fields.description ?? '', deadline: fields.deadline } }]
           }
           if (remove) return [{ t: 'goal.delete', id }]
-          return [{ t: 'goal.update', id, patch: fields }]
+          const ops: Op[] = Object.values(fields).some((v) => v !== undefined) ? [{ t: 'goal.update', id, patch: fields }] : []
+          if (openingPathId) {
+            const p = doc.paths.find((x) => x.id === openingPathId)
+            if (!p || p.goalId !== id) throw new Error(`Path "${openingPathId}" doesn't lead to that goal`)
+            ops.push(...openWithOps(doc, openingPathId))
+          } else if (openingPathId === null) ops.push({ t: 'goal.update', id, patch: { opening: null } })
+          return ops
         })
         return text({ goalId: id })
       } catch (e) {

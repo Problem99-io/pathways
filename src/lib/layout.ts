@@ -8,6 +8,7 @@
 import { Graph, layout as dagreLayout } from '@dagrejs/dagre'
 import { children, planningView, plannedWindow, scopeNodes, type PathMetrics } from '../../shared/metrics'
 import { deadSet, normalised, outcomeIndex, selectedOutcome, waitingOnBranch } from '../../shared/branches'
+import { playbook, type Play, type PlayWay } from '../../shared/playbook'
 import type { Goal, Path, PathNode, PathwayDoc, Person } from '../../shared/types'
 
 export const STEP_W = 264
@@ -56,6 +57,8 @@ export interface StepData extends Record<string, unknown> {
   reach: number | null
   /** When this step is a fork. */
   fork: StepFork | null
+  /** Part of a play no fork switches to, while the goal has a playbook. */
+  bench: boolean
 }
 
 export interface StepFork {
@@ -79,6 +82,10 @@ export interface EdgeOutcome {
   branchId: string
   /** This future switches to another path (its name). */
   jump?: string
+  /** Where its pill sits in the column right after the fork: i of k, all w wide. */
+  slot: { i: number; k: number; w: number }
+  /** Draw the pill on this edge (an outcome with several first steps shows it once). */
+  pill: boolean
 }
 
 export interface LaneData extends Record<string, unknown> {
@@ -89,6 +96,19 @@ export interface LaneData extends Record<string, unknown> {
   quickest: boolean
   multiGoal: boolean
   here: PathNode | null
+  /** Its place in the goal's playbook, when there is one. */
+  play?: LanePlay
+  /** No playbook yet: pursuing this path makes it the one you open with. */
+  opener: boolean
+}
+
+export interface LanePlay {
+  role: Play['role']
+  /** For a backup: the switch it hangs from, and the path that switch is on. */
+  via?: PlayWay & { fromName: string }
+  ways: number
+  /** Lead-in steps hidden because switching in skips them. */
+  skipped: number
 }
 
 export interface StartData extends Record<string, unknown> {
@@ -107,6 +127,7 @@ export interface GoalData extends Record<string, unknown> {
   best?: { name: string; days: number; color: string; meets?: boolean; forecast: string } | null
   paths: number
   hl: Hl
+  book?: { opening: string; color: string; backups: number; unused: number } | null
 }
 
 export interface GhostData extends Record<string, unknown> {
@@ -171,17 +192,37 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
     : doc.paths.filter((p) => p.status !== 'archived' && (!o.focusPathId || p.id === o.focusPathId))
   const goals = parent ? [] : doc.goals
 
-  // group lanes by goal, in goal order
+  // playbooks: open with one path, the goal's others hang off the forks that switch to them
+  const books = new Map(parent || o.focusPathId ? [] : goals.map((g) => [g.id, playbook(doc, g.id)]))
+  const playOf = new Map<string, Play>()
+  for (const b of books.values()) if (b.opening) for (const x of b.plays) playOf.set(x.path.id, x)
+  // a backup's lead-in is skipped when you switch in, so it's hidden, unless you're running that play from its start
+  const hidden = new Set<string>()
+  const hung = new Set<string>()
+  for (const x of playOf.values()) {
+    if (x.role !== 'backup' || !x.via) continue
+    const cur = x.path.currentNodeId
+    if ((x.path.pursuing && !cur) || (cur && x.leadIn.includes(cur))) continue
+    for (const id of x.leadIn) hidden.add(id)
+    hung.add(x.path.id)
+  }
+
+  // group lanes by goal, in goal order (a playbook's opening first, then its backups, then unused plays)
   const lanes: { path: Path; goal?: Goal }[] = []
   if (parent) lanes.push({ path: visiblePaths[0] })
   else
-    for (const g of goals) for (const p of visiblePaths) if (p.goalId === g.id) lanes.push({ path: p, goal: g })
+    for (const g of goals) {
+      const book = books.get(g.id)
+      const mine = visiblePaths.filter((p) => p.goalId === g.id)
+      if (book?.opening) mine.sort((a, b) => book.plays.findIndex((x) => x.path.id === a.id) - book.plays.findIndex((x) => x.path.id === b.id))
+      for (const p of mine) lanes.push({ path: p, goal: g })
+    }
   // paths pointing at a missing goal
   if (!parent) for (const p of visiblePaths) if (!lanes.some((l) => l.path.id === p.id)) lanes.push({ path: p, goal: goals[0] })
 
   const scopeList = parent
     ? scopeNodes(doc, parent.pathId, parent.id)
-    : doc.nodes.filter((n) => n.parentId === null && lanes.some((l) => l.path.id === n.pathId))
+    : doc.nodes.filter((n) => n.parentId === null && !hidden.has(n.id) && lanes.some((l) => l.path.id === n.pathId))
   const scopeIds = new Set(scopeList.map((n) => n.id))
   const laneX = START_W + COL_GAP
 
@@ -220,20 +261,46 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
       planned: !resolved && selectedOutcome(planningView(doc).nodes.find((x) => x.id === b.id) ?? b) === oc.id,
       days: o.metrics[b.pathId]?.futures?.byOutcome[oc.id]?.days,
       branchId: b.id,
+      ...slotOf(b.id, oc.id),
     }
   }
+  // each fork's outcome pills stack in a column right after it, one per future that has somewhere to go
+  const pillCols = new Map<string, { ids: string[]; w: number }>()
+  const scopeNode = new Map(scopeList.map((n) => [n.id, n]))
+  for (const n of scopeList) {
+    if (!n.branch?.outcomes.length) continue
+    const odds = normalised(n.branch)
+    const shown = n.branch.outcomes.filter((x) =>
+      x.jumpTo ? scopeNode.has(x.jumpTo.nodeId) : scopeList.some((m) => m.outcomeOf === x.id && m.dependsOn.includes(n.id)),
+    )
+    if (!shown.length) continue
+    const text = (x: (typeof shown)[number]) => {
+      const days = o.metrics[n.pathId]?.futures?.byOutcome[x.id]?.days
+      const jump = x.jumpTo && doc.paths.find((p) => p.id === x.jumpTo!.pathId)?.name
+      return `${n.branch!.mode === 'chance' ? `${Math.round(odds.find((y) => y.id === x.id)!.probability * 100)}% ` : '   '}${x.label}${jump ? `   ${jump}` : ''}${days !== undefined ? ` ~${Math.round(days)}d` : ''}`
+    }
+    pillCols.set(n.id, { ids: shown.map((x) => x.id), w: Math.max(...shown.map((x) => pillWidth(text(x)))) })
+  }
+  const pillSeen = new Set<string>()
+  const slotOf = (forkId: string, outcomeId: string) => {
+    const c = pillCols.get(forkId)
+    const first = !pillSeen.has(outcomeId)
+    pillSeen.add(outcomeId)
+    return { slot: { i: Math.max(0, c?.ids.indexOf(outcomeId) ?? 0), k: c?.ids.length ?? 1, w: c?.w ?? PILL_MAX }, pill: first }
+  }
+
   const edgeFate = (a?: string, b?: string): FlowEdgeData['fate'] => {
     const f = [a, b].filter(Boolean).map((x) => fateOf(x!))
     return f.includes('gone') ? 'gone' : f.includes('alt') ? 'alt' : undefined
   }
 
   // ---- lay out each lane with dagre ----
-  type Lane = { path: Path; goal?: Goal; items: { n: PathNode; x: number; y: number; h: number }[]; w: number; h: number }
+  type Lane = { path: Path; goal?: Goal; items: { n: PathNode; x: number; y: number; h: number }[]; w: number; h: number; dx: number }
   const laid: Lane[] = []
   for (const l of lanes) {
     const list = scopeList.filter((n) => n.pathId === l.path.id)
     if (!list.length) {
-      laid.push({ ...l, items: [], w: STEP_W, h: STEP_H * 0.75 })
+      laid.push({ ...l, items: [], w: STEP_W, h: STEP_H * 0.75, dx: 0 })
       continue
     }
     const g = new Graph()
@@ -245,7 +312,13 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
       heights.set(n.id, h)
       g.setNode(n.id, { width: STEP_W, height: h })
     }
-    for (const n of list) for (const d of n.dependsOn) if (heights.has(d)) g.setEdge(d, n.id)
+    // a fork's pills sit right after it: leave room for that column before its next steps
+    for (const n of list)
+      for (const d of n.dependsOn) {
+        if (!heights.has(d)) continue
+        const col = pillCols.get(d)
+        g.setEdge(d, n.id, col ? { width: col.w + PILL_GAP * 2, height: 30, labelpos: 'c' } : {})
+      }
     dagreLayout(g)
     const items = list.map((n) => {
       const p = g.node(n.id) as { x: number; y: number }
@@ -256,7 +329,16 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
     for (const i of items) i.y -= minY
     const w = Math.max(...items.map((i) => i.x + STEP_W))
     const h = Math.max(...items.map((i) => i.y + i.h))
-    laid.push({ ...l, items, w, h })
+    // a backup play starts just after the fork that switches to it
+    let dx = 0
+    const via = hung.has(l.path.id) ? playOf.get(l.path.id)!.via! : null
+    if (via) {
+      const from = laid.find((x) => x.path.id === via.fromPathId)
+      const fork = from?.items.find((i) => i.n.id === via.forkId)
+      const entry = items.find((i) => i.n.id === via.nodeId)
+      if (from && fork && entry) dx = Math.max(0, from.dx + fork.x + STEP_W + 92 - entry.x)
+    }
+    laid.push({ ...l, items, w, h, dx })
   }
 
   // ---- stack lanes vertically ----
@@ -281,7 +363,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
     y += GOAL_H
   }
   const totalH = Math.max(y, START_H)
-  const maxW = Math.max(STEP_W, ...laid.map((l) => l.w))
+  const maxW = Math.max(STEP_W, ...laid.map((l) => l.dx + l.w))
   const goalX = laneX + maxW + COL_GAP
 
   // ---- fog: distance forward from "you are here" ----
@@ -294,7 +376,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
   }
   for (const n of scopeList) {
     const deps = n.dependsOn.filter((d) => scopeIds.has(d))
-    if (!deps.length) add(START_ID, n.id)
+    if (!deps.length && !hung.has(n.pathId)) add(START_ID, n.id)
     for (const d of deps) add(d, n.id)
     if (!scopeList.some((s) => s.dependsOn.includes(n.id))) add(n.id, exitOf(n.pathId))
   }
@@ -346,6 +428,27 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
     }
     for (const [id, d] of dist) if (id !== START_ID) distOf.set(id, d)
   }
+  const switchedTo = new Set<string>()
+  for (const l of laid) {
+    const x = playOf.get(l.path.id)
+    if (!hung.has(l.path.id) || anchorOf.has(l.path.id) || !x) continue
+    switchedTo.add(l.path.id)
+    const queue: string[] = []
+    for (const w of x.ways) {
+      const d = distOf.get(w.forkId)
+      if (d === undefined || !scopeIds.has(w.nodeId)) continue
+      if ((distOf.get(w.nodeId) ?? Infinity) > d + 1) (distOf.set(w.nodeId, d + 1), queue.push(w.nodeId))
+    }
+    while (queue.length) {
+      const cur = queue.shift()!
+      for (const nx of succ.get(cur) ?? []) {
+        const n = scopeList.find((s) => s.id === nx)
+        if (!n || n.pathId !== l.path.id) continue
+        const d = distOf.get(cur)! + (finished(n) ? 0 : 1)
+        if ((distOf.get(nx) ?? Infinity) > d) (distOf.set(nx, d), queue.push(nx))
+      }
+    }
+  }
   const hlPath = parent ? null : o.highlightPathId && lanes.some((l) => l.path.id === o.highlightPathId) ? o.highlightPathId : null
   const hlOf = (pathId: string): Hl => (hlPath ? (pathId === hlPath ? 'on' : 'off') : null)
   // route numbers along the highlighted path
@@ -368,7 +471,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
     const pid = n?.pathId ?? pathId
     if (hlPath && pid) return pid === hlPath ? 0 : 2
     if (!o.fog) return 0
-    const tracked = !!pid && anchorOf.has(pid)
+    const tracked = !!pid && (anchorOf.has(pid) || switchedTo.has(pid))
     if (!n) return tracked ? 0 : 3
     if (finished(n)) return tracked ? 0 : 2
     if (!tracked) return 3
@@ -378,6 +481,18 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
     if (d === 2) return 1
     if (d === 3) return 2
     return 3
+  }
+
+  const openerFor = (g: Goal | undefined, path: Path) => {
+    const b = g && books.get(g.id)
+    if (!g || !b || b.opening || g.opening === null || path.pursuing || b.plays.length < 2) return false
+    return !b.plays.some((x) => x.path.pursuing)
+  }
+  const lanePlay = (pathId: string): LanePlay | undefined => {
+    const x = playOf.get(pathId)
+    if (!x) return undefined
+    const via = x.via && { ...x.via, fromName: doc.paths.find((p) => p.id === x.via!.fromPathId)?.name ?? '' }
+    return { role: x.role, via, ways: x.ways.length, skipped: hung.has(pathId) ? x.leadIn.length : 0 }
   }
 
   // ---- start / entry node ----
@@ -406,7 +521,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
       nodes.push({
         id: laneId(l.path.id),
         type: 'lane',
-        x: laneX,
+        x: laneX + l.dx,
         y: ly - 66,
         w: Math.max(l.w, STEP_W),
         h: 28,
@@ -418,6 +533,8 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
           quickest: !!l.goal && o.best[l.goal.id] === l.path.id,
           multiGoal: goals.length > 1,
           here: l.path.currentNodeId ? doc.nodes.find((n) => n.id === l.path.currentNodeId) ?? null : null,
+          play: lanePlay(l.path.id),
+          opener: openerFor(l.goal, l.path),
         } satisfies LaneData,
       })
     }
@@ -425,7 +542,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
       nodes.push({
         id: ghostId(l.path.id),
         type: 'ghost',
-        x: laneX,
+        x: laneX + l.dx,
         y: ly,
         w: STEP_W,
         h: STEP_H * 0.75,
@@ -450,7 +567,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
       nodes.push({
         id: n.id,
         type: 'step',
-        x: laneX + it.x,
+        x: laneX + l.dx + it.x,
         y: ly + it.y,
         w: STEP_W,
         h: it.h,
@@ -474,6 +591,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
           fate: fateOf(n.id),
           reach: reachOf(n),
           fork: forkInfo(n),
+          bench: playOf.get(n.pathId)?.role === 'unused',
         } satisfies StepData,
       })
     }
@@ -483,7 +601,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
       const deps = n.dependsOn.filter((d) => scopeIds.has(d))
       const at = anchorOf.get(l.path.id)
       const st = (src?: PathNode): FlowEdgeData['state'] => (!src ? (at === START_ID ? 'active' : at ? 'done' : 'future') : at === src.id ? 'active' : finished(src) ? 'done' : 'future')
-      if (!deps.length) {
+      if (!deps.length && !hung.has(l.path.id)) {
         const e = flowEdge(`e:${START_ID}->${n.id}`, START_ID, n.id, l.path, st(), fogFor(n.id, n))
         e.data.insert = { pathId: l.path.id, parentId: parent?.id ?? null, before: n.id }
         e.data.fate = edgeFate(n.id)
@@ -522,6 +640,7 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
           days: o.metrics[n.pathId]?.futures?.byOutcome[oc.id]?.days,
           branchId: n.id,
           jump: toPath?.name,
+          ...slotOf(n.id, oc.id),
         }
         edges.push(e)
       }
@@ -575,6 +694,11 @@ export function computeLayout(doc: PathwayDoc, o: LayoutOptions) {
           fog: 0,
           hl: hlPath ? (doc.paths.find((p) => p.id === hlPath)?.goalId === g.id ? 'on' : 'off') : null,
           paths: doc.paths.filter((p) => p.goalId === g.id && p.status !== 'archived').length,
+          book: (() => {
+            const b = books.get(g.id)
+            if (!b?.opening) return null
+            return { opening: b.opening.name, color: b.opening.color, backups: b.plays.filter((x) => x.role === 'backup').length, unused: b.plays.filter((x) => x.role === 'unused').length }
+          })(),
           best:
             bp && bm
               ? {
@@ -610,5 +734,11 @@ function flowEdge(id: string, source: string, target: string, path: Path, state:
     data: { color: path.color, state, proposed: path.status === 'proposed', fog, hl: null },
   }
 }
+
+/** Room between a fork and its column of outcome pills. */
+export const PILL_GAP = 18
+const PILL_MAX = 290
+/** About how wide an outcome pill is (odds, label, path, days). */
+const pillWidth = (text: string) => Math.round(Math.min(PILL_MAX, 34 + text.length * 5.9))
 
 const laneSort = (a: PathNode, b: PathNode) => a.createdAt.localeCompare(b.createdAt)

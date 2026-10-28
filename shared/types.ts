@@ -103,6 +103,13 @@ export interface Goal {
   description: string
   deadline?: string
   color: string
+  /**
+   * The play you open with: the path you start on. The goal's other paths stay
+   * as backup plays you switch to when a fork goes their way. Unset = the one
+   * path you're pursuing toward this goal, if there's exactly one; null = no
+   * playbook, show the paths side by side. Patching it with "" unsets it.
+   */
+  opening?: string | null
 }
 
 export interface Path {

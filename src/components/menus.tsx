@@ -40,12 +40,15 @@ import {
   Split,
   Dices,
   Shuffle,
+  BookOpen,
+  Rows3,
 } from 'lucide-react'
+import { openingOf } from '../../shared/playbook'
 import { rankByGoal } from '../../shared/metrics'
 import { uid, type Op } from '../../shared/ops'
 import { PATH_COLORS, type NodeKind, type NodeStatus, type PathNode, type Pathway } from '../../shared/types'
 import { mePerson, myName, useStore } from '../store'
-import { addFutures, addJump, addNext, addOutcome, addParallel, addStep, complete, drillInto, forkFrom, newPath, pursue, removeFutures, removeStep, setCurrent, settleFork } from '../lib/actions'
+import { addFutures, addJump, addNext, addOutcome, addParallel, addStep, complete, drillInto, forkFrom, newPath, openWith, pursue, removeFutures, removeStep, setCurrent, setPlaybook, settleFork } from '../lib/actions'
 import { normalised } from '../../shared/branches'
 import { pathMetrics, topo } from '../../shared/metrics'
 import { fmtDate, KIND_LABEL, STATUS_LABEL } from '../lib/format'
@@ -295,6 +298,7 @@ function pathMenu(doc: Pathway, id: string): MenuSpec | null {
   const path = doc.paths.find((p) => p.id === id)
   if (!path) return null
   const goal = doc.goals.find((g) => g.id === path.goalId)
+  const siblings = doc.paths.filter((p) => p.goalId === path.goalId && p.id !== path.id && p.status !== 'archived').length
   const hl = s.highlightPathId === path.id
   const iso = s.focusPathId === path.id
   const patch = (p: Partial<typeof path>) => dispatch([{ t: 'path.update', id: path.id, patch: p }])
@@ -309,6 +313,9 @@ function pathMenu(doc: Pathway, id: string): MenuSpec | null {
     path.pursuing
       ? { id: 'pause', label: 'Stop pursuing', icon: Pause, run: () => pursue(path.id, false) }
       : { id: 'pursue', label: 'Pursue this path', icon: Play, run: () => pursue(path.id, true) },
+    siblings > 0 && openingOf(doc, path.goalId)?.id !== path.id
+      ? { id: 'open', label: 'Start with this play', icon: BookOpen, run: () => openWith(path.id) }
+      : null,
     path.currentNodeId ? { id: 'reset', label: 'Move “here” back to its start', icon: RotateCcw, run: () => setCurrent(null, path.id) } : null,
     { id: 'hl', label: hl ? 'Clear highlight' : 'Highlight', icon: Highlighter, run: () => s.setHighlight(hl ? null : path.id) },
     { id: 'iso', label: iso ? 'Show all paths' : 'Show only this path', icon: Focus, run: () => s.setFocusPath(iso ? null : path.id) },
@@ -360,6 +367,8 @@ function goalMenu(doc: Pathway, id: string): MenuSpec | null {
   const goal = doc.goals.find((g) => g.id === id)
   if (!goal) return null
   const quickest = rankByGoal(doc)[goal.id]?.quickest
+  const plays = doc.paths.filter((p) => p.goalId === goal.id && p.status !== 'archived').length
+  const opening = openingOf(doc, goal.id)
   return {
     title: goal.title,
     sub: goal.deadline ? `Goal · by ${fmtDate(goal.deadline)}` : 'Goal',
@@ -370,6 +379,21 @@ function goalMenu(doc: Pathway, id: string): MenuSpec | null {
       { id: 'edit', label: 'Edit goal & deadline', icon: Target, run: () => s.setSide('context', 'goals') },
       { id: 'new', label: 'New path to this goal', icon: Plus, run: () => newPath(goal.id) },
       { id: 'quick', label: 'Highlight the quickest path', icon: Highlighter, disabled: !quickest, run: () => quickest && s.setHighlight(quickest) },
+      plays > 1
+        ? {
+            id: 'book',
+            label: 'Start with…',
+            icon: BookOpen,
+            items: doc.paths
+              .filter((p) => p.goalId === goal.id && p.status !== 'archived')
+              .map((p) => ({ id: p.id, label: p.name, color: p.color, checked: opening?.id === p.id, run: () => openWith(p.id) })),
+          }
+        : null,
+      plays > 1 && (opening || goal.opening === undefined)
+        ? { id: 'side', label: 'Show paths side by side', icon: Rows3, run: () => setPlaybook(goal.id, false) }
+        : plays > 1
+          ? { id: 'side', label: 'Show as a playbook', icon: BookOpen, run: () => setPlaybook(goal.id, true) }
+          : null,
       { id: 'fw', label: 'What’s next toward it', icon: Telescope, kbd: 'W', run: () => s.setSide('forward') },
       { id: 'ai', label: 'Ask AI for more paths here', icon: Sparkles, run: () => ask(`Generate 2–3 genuinely different paths to the goal “${goal.title}”, then compare them.`) },
       '-',
@@ -382,7 +406,7 @@ function goalMenu(doc: Pathway, id: string): MenuSpec | null {
         confirm: 'Click again — its paths move to another goal',
         run: () => dispatch([{ t: 'goal.delete', id: goal.id }]),
       },
-    ],
+    ].filter(Boolean) as MenuEntry[],
   }
 }
 

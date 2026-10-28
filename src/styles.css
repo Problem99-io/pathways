@@ -4723,7 +4723,8 @@ kbd {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  max-width: 190px;
+  transform: translateY(-50%);
+  transform-origin: left center;
   height: 22px;
   padding: 0 8px;
   border-radius: 99px;
@@ -4737,7 +4738,7 @@ kbd {
   z-index: 2;
 }
 .outcome-pill:hover {
-  transform: translate(-50%, -50%) scale(1.06) !important;
+  transform: translateY(-50%) scale(1.04);
   border-color: var(--c);
   color: var(--text);
 }
@@ -4749,10 +4750,22 @@ kbd {
 .outcome-pill .op-label {
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+.outcome-pill > b,
+.outcome-pill > svg {
+  flex: none;
+}
+.outcome-pill .op-jump {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
 }
 .outcome-pill .op-days {
   font-family: var(--mono);
   color: var(--faint);
+  margin-left: auto;
 }
 .outcome-pill.planned {
   border-color: color-mix(in srgb, var(--c) 70%, transparent);
@@ -4996,4 +5009,64 @@ kbd {
 }
 .future-foot .link {
   min-width: 0;
+}
+
+/* ---------- playbook: open with one play, the others wait as backups ---------- */
+.play-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  flex: none;
+}
+.play-tag b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+.play-tag .faint {
+  color: var(--faint);
+}
+.play-tag.opening {
+  color: var(--c);
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.play-tag.backup svg {
+  color: var(--c);
+}
+.play-tag.unused {
+  color: var(--faint);
+  background: none;
+  border: 1px dashed var(--line);
+}
+.lane-label.play-unused .lane-name {
+  color: var(--muted);
+}
+.node.bench:not(.hl-on) {
+  opacity: 0.5;
+  filter: saturate(0.5);
+  transition: opacity 0.3s, filter 0.3s;
+}
+.node.bench:hover {
+  opacity: 0.9;
+  filter: none;
+}
+.goal-book {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+.goal-book svg {
+  color: var(--faint);
 }
